@@ -3,7 +3,9 @@
 ## 📋 Pre-Push Checklist
 
 ### 1. Create Repository Structure
-```
+
+```bash
+
 google-maps-scraper/
 ├── README.md
 ├── LICENSE
@@ -23,7 +25,8 @@ google-maps-scraper/
 ### 2. Create Essential Files
 
 #### `.gitignore`
-```
+
+```bash
 # Python
 __pycache__/
 *.py[cod]
@@ -66,13 +69,15 @@ Thumbs.db
 ```
 
 #### `requirements.txt`
-```
+
+```bash
 selenium==4.15.2
 webdriver-manager==4.0.1
 ```
 
 #### `LICENSE` (MIT License)
-```
+
+```text
 MIT License
 
 Copyright (c) 2025 [Your Name]
@@ -99,6 +104,7 @@ SOFTWARE.
 ## 🚀 Step-by-Step GitHub Setup
 
 ### Step 1: Initialize Git Repository
+
 ```bash
 # Navigate to your project directory
 cd C:\Users\power\Documents\sustainability_scraper
@@ -114,7 +120,8 @@ git commit -m "Initial commit: Google Maps Scraper v1.0.0"
 ```
 
 ### Step 2: Create GitHub Repository
-1. Go to https://github.com/new
+
+1. Go to [https://github.com/new]
 2. Repository name: `google-maps-scraper`
 3. Description: `A powerful Python-based web scraper for extracting business information from Google Maps`
 4. Choose Public or Private
@@ -122,6 +129,7 @@ git commit -m "Initial commit: Google Maps Scraper v1.0.0"
 6. Click "Create repository"
 
 ### Step 3: Connect Local to GitHub
+
 ```bash
 # Add remote origin (replace YOUR_USERNAME with your GitHub username)
 git remote add origin https://github.com/YOUR_USERNAME/google-maps-scraper.git
@@ -135,6 +143,7 @@ git push -u origin main
 ```
 
 ### Step 4: Create Releases and Tags
+
 ```bash
 # Create a tag for version 1.0.0
 git tag -a v1.0.0 -m "Release v1.0.0: Initial stable release"
@@ -144,15 +153,18 @@ git push origin v1.0.0
 ```
 
 ### Step 5: Create GitHub Release
+
 1. Go to your repository on GitHub
 2. Click "Releases" → "Create a new release"
 3. Choose tag: `v1.0.0`
 4. Release title: `v1.0.0 - Initial Release`
 5. Description:
-```markdown
+
+````markdown
 ## 🎉 Initial Release
 
 ### Features
+
 - ✅ Generic Google Maps scraper for any business type
 - ✅ Command-line interface with multiple options
 - ✅ Automatic cookie consent handling
@@ -163,43 +175,51 @@ git push origin v1.0.0
 - ✅ Test mode for verification before full scraping
 
 ### Requirements
+
 - Python 3.7+
 - Chrome browser
 - See requirements.txt for Python packages
 
 ### Installation
+
 ```bash
 pip install -r requirements.txt
 ```
+````
 
 ### Quick Start
+
 ```bash
 python google_maps_scraper.py -q "restaurants" -c "New York, USA" --test
 ```
 
 See README.md for full documentation.
-```
-6. Click "Publish release"
+
+1. Click "Publish release"
 
 ## 📝 Repository Settings
 
 ### Add Topics (GitHub repository tags)
+
 1. Go to repository settings
 2. Add topics: `python`, `selenium`, `web-scraping`, `google-maps`, `data-extraction`, `scraper`, `automation`
 
 ### Enable GitHub Pages (Optional)
+
 1. Settings → Pages
 2. Source: Deploy from a branch
 3. Branch: main, folder: /docs
 4. Create a simple documentation site
 
 ### Add Repository Description
+
 - Short description: "Extract business data from Google Maps with this powerful Python scraper"
 - Website: Add your documentation URL if you have one
 
 ## 🔄 Future Updates Workflow
 
 ### When Making Changes
+
 ```bash
 # Create a new branch for features
 git checkout -b feature/new-feature
@@ -218,6 +238,7 @@ git pull origin main
 ```
 
 ### Version Updates
+
 ```bash
 # Update version in google_maps_scraper.py
 # Update CHANGELOG.md
@@ -248,6 +269,7 @@ git push origin v1.1.0
 ## 🤝 Contributing Guidelines
 
 Create `CONTRIBUTING.md`:
+
 ```markdown
 # Contributing to Google Maps Scraper
 
@@ -276,6 +298,7 @@ We welcome contributions! Please follow these guidelines:
 ## Reporting Bugs
 
 Use GitHub Issues with:
+
 - Clear description
 - Steps to reproduce
 - Expected vs actual behavior

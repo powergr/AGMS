@@ -92,7 +92,18 @@ The script now shows:
 - Sample results preview
 - Cities processed
 
+  
+
 ![Python Version](https://img.shields.io/badge/python-3.7+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
 ![Status](https://img.shields.io/badge/status-active-brightgreen)
+
+
+<image-card alt="Python" src="https://img.shields.io/badge/topic-python-blue" ></image-card>
+<image-card alt="Selenium" src="https://img.shields.io/badge/topic-selenium-blue" ></image-card>
+<image-card alt="Web Scraping" src="https://img.shields.io/badge/topic-web--scraping-blue" ></image-card>
+<image-card alt="Google Maps" src="https://img.shields.io/badge/topic-google--maps-blue" ></image-card>
+<image-card alt="Data Extraction" src="https://img.shields.io/badge/topic-data--extraction-blue" ></image-card>
+<image-card alt="Scraper" src="https://img.shields.io/badge/topic-scraper-blue" ></image-card>
+<image-card alt="Automation" src="https://img.shields.io/badge/topic-automation-blue" ></image-card>

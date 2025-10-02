@@ -99,14 +99,10 @@ The script now shows:
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
 ![Status](https://img.shields.io/badge/status-active-brightgreen)
 
-```
-markdown
-<image-card alt="Python" src="https://img.shields.io/badge/topic-python-blue" ></image-card>
-<image-card alt="Selenium" src="https://img.shields.io/badge/topic-selenium-blue" ></image-card>
-<image-card alt="Web Scraping" src="https://img.shields.io/badge/topic-web--scraping-blue" ></image-card>
-<image-card alt="Google Maps" src="https://img.shields.io/badge/topic-google--maps-blue" ></image-card>
-<image-card alt="Data Extraction" src="https://img.shields.io/badge/topic-data--extraction-blue" ></image-card>
-<image-card alt="Scraper" src="https://img.shields.io/badge/topic-scraper-blue" ></image-card>
-<image-card alt="Automation" src="https://img.shields.io/badge/topic-automation-blue" ></image-card>
-
-```
+![Python](https://img.shields.io/badge/topic-python-blue)
+![Selenium](https://img.shields.io/badge/topic-selenium-blue)
+![Web Scraping](https://img.shields.io/badge/topic-web--scraping-blue)
+![Google Maps](https://img.shields.io/badge/topic-google--maps-blue)
+![Data Extraction](https://img.shields.io/badge/topic-data--extraction-blue)
+![Scraper](https://img.shields.io/badge/topic-scraper-blue)
+![Automation](https://img.shields.io/badge/topic-automation-blue)

@@ -86,15 +86,15 @@ python generic_maps_scraper.py -q "vegan restaurants" -c "Los Angeles, USA" "San
 
 ## 📊 **Enhanced Statistics:**
 
+The script now shows:
+- Total companies found
+- Percentage with ratings, reviews, websites, phones, and addresses
+- Sample results preview
+- Cities processed
+
 ```markdown
 ![Python Version](https://img.shields.io/badge/python-3.7%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
 ![Status](https://img.shields.io/badge/status-active-success)
 ```
-
-The script now shows:
-- Total companies found
-- Percentage with ratings, reviews, websites, phones, addresses
-- Sample results preview
-- Cities processed

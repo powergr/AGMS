@@ -92,9 +92,7 @@ The script now shows:
 - Sample results preview
 - Cities processed
 
-```markdown
-![Python Version](https://img.shields.io/badge/python-3.7%2B-blue)
+![Python Version](https://img.shields.io/badge/python-3.7+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
-![Status](https://img.shields.io/badge/status-active-success)
-```
+![Status](https://img.shields.io/badge/status-active-brightgreen)

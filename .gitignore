@@ -1,0 +1,41 @@
+```
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+sustainability_scraper_env/
+*.egg-info/
+dist/
+build/
+
+# Selenium
+*.log
+geckodriver.log
+chromedriver.log
+
+# Output files
+*.csv
+*.json
+output/*.csv
+output/*.json
+!examples/*.csv
+!examples/*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Chrome driver cache
+.wdm/
+```

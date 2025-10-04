@@ -17,6 +17,9 @@ import logging
 import random
 import urllib.parse
 
+# Version
+__version__ = "1.1.0"
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,62 @@ class GoogleMapsScraper:
             logger.error(f"Failed to initialize Chrome driver: {e}")
             raise
     
+    def handle_cookie_consent(self):
+        """Automatically handle Google's cookie consent popup"""
+        try:
+            time.sleep(2)
+            
+            # Try different button selectors for "Reject all" or "Accept all"
+            consent_buttons = [
+                'button[aria-label*="Reject all"]',
+                'button[aria-label*="reject all"]',
+                'button[aria-label*="Accept all"]',
+                'button[aria-label*="accept all"]',
+                'form[action*="consent"] button',
+                'button.VfPpkd-LgbsSe'
+            ]
+            
+            for selector in consent_buttons:
+                try:
+                    buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for button in buttons:
+                        if button.is_displayed() and button.is_enabled():
+                            button_text = button.text.lower()
+                            if 'reject' in button_text or 'accept' in button_text:
+                                self.driver.execute_script("arguments[0].click();", button)
+                                logger.info(f"Clicked cookie consent button: {button.text}")
+                                time.sleep(2)
+                                return
+                except:
+                    continue
+            
+            # Try XPath if CSS selectors fail
+            try:
+                xpath_selectors = [
+                    "//button[contains(text(), 'Reject all')]",
+                    "//button[contains(text(), 'Accept all')]",
+                    "//button[contains(@aria-label, 'Reject')]",
+                    "//button[contains(@aria-label, 'Accept')]"
+                ]
+                
+                for xpath in xpath_selectors:
+                    try:
+                        button = self.driver.find_element(By.XPATH, xpath)
+                        if button.is_displayed():
+                            self.driver.execute_script("arguments[0].click();", button)
+                            logger.info("Clicked cookie consent button via XPath")
+                            time.sleep(2)
+                            return
+                    except:
+                        continue
+            except:
+                pass
+            
+            logger.debug("No cookie consent popup found or already handled")
+            
+        except Exception as e:
+            logger.debug(f"Error handling cookie consent: {e}")
+    
     def search_google_maps(self, query, city):
         search_term = f"{query} {city}"
         logger.info(f"Searching for: {search_term}")
@@ -58,6 +117,9 @@ class GoogleMapsScraper:
         try:
             self.driver.get("https://www.google.com/maps")
             time.sleep(random.uniform(3, 5))
+            
+            # Handle cookie consent popup
+            self.handle_cookie_consent()
             
             search_box = self.wait.until(EC.presence_of_element_located((By.ID, "searchboxinput")))
             search_box.clear()
@@ -217,18 +279,19 @@ class GoogleMapsScraper:
                 if rating_match:
                     business_data['rating'] = rating_match.group(1)
                 
+                # Extract reviews - FIXED to capture correct numbers
                 review_patterns = [
-                    r'(\d[\d,]*)\s*review',
-                    r'\((\d[\d,]*)\)',
-                    r'(\d[\d,]*)\s*rating',
-                    r'(\d[\d,]*)\s*avis'
+                    r'(\d+)\s+review',
+                    r'\((\d+)\)',
+                    r'(\d+)\s+rating',
+                    r'(\d+)\s+avis'
                 ]
                 
                 for pattern in review_patterns:
                     review_match = re.search(pattern, aria_label, re.IGNORECASE)
                     if review_match:
-                        review_number = review_match.group(1).replace(',', '').replace(' ', '').replace('\xa0', '')
-                        business_data['reviews'] = review_number
+                        business_data['reviews'] = review_match.group(1)
+                        logger.debug(f"Found reviews from aria-label: {business_data['reviews']}")
                         break
             
             if business_data['company']:
@@ -450,7 +513,6 @@ class GoogleMapsScraper:
                         # Try aria-label first (most reliable)
                         aria_label = elem.get_attribute('aria-label')
                         if aria_label:
-                            # Look for pattern like "123 reviews" or "123 avis"
                             review_match = re.search(r'(\d+)\s+(?:review|avis)', aria_label, re.IGNORECASE)
                             if review_match:
                                 business_data['reviews'] = review_match.group(1)
@@ -460,7 +522,7 @@ class GoogleMapsScraper:
                         # Try text content
                         review_text = elem.text.strip()
                         if review_text:
-                            # Look for just numbers in parentheses like "(123)"
+                            # Look for numbers in parentheses like "(123)"
                             review_match = re.search(r'\((\d+)\)', review_text)
                             if review_match:
                                 business_data['reviews'] = review_match.group(1)
@@ -585,6 +647,13 @@ Examples:
         '''
     )
     
+    # Version argument
+    parser.add_argument(
+        '-v', '--version',
+        action='version',
+        version=f'%(prog)s {__version__}'
+    )
+    
     # Required arguments
     parser.add_argument(
         '-q', '--query',
@@ -647,7 +716,7 @@ Examples:
         help='Maximum results per city (default: all)'
     )
     parser.add_argument(
-        '-v', '--verbose',
+        '--verbose',
         action='store_true',
         help='Verbose output (show detailed logs)'
     )
@@ -660,6 +729,10 @@ def main():
     # Set logging level
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Display version and header
+    print(f"Google Maps Scraper v{__version__}")
+    print("=" * 60)
     
     # Load cities
     if args.cities_file:
@@ -679,9 +752,8 @@ def main():
         print(f"Limited to first {len(cities)} cities")
     
     # Display configuration
-    print("=" * 60)
-    print("Google Maps Scraper - Configuration")
-    print("=" * 60)
+    print("Configuration")
+    print("-" * 60)
     print(f"Search Query: {args.query}")
     print(f"Cities to process: {len(cities)}")
     print(f"Output file: {args.output}")

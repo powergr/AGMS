@@ -1,4 +1,4 @@
-# 🗺️ Google Maps Scraper
+# 🗺️ Another Google Maps Scraper (AGMS)
 
 A powerful, generic Python-based web scraper for extracting business information from Google Maps. Perfect for market research, lead generation, and competitive analysis.
 

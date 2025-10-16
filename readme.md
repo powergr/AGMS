@@ -2,6 +2,8 @@
 
 A powerful, generic Python-based web scraper for extracting business information from Google Maps. Perfect for market research, lead generation, and competitive analysis.
 
+** Added an email extractor, because Google Maps does not have emails in companies.
+
 ![Python Version](https://img.shields.io/badge/python-3.7%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.1.0-orange)
@@ -9,7 +11,7 @@ A powerful, generic Python-based web scraper for extracting business information
 
 ## ✨ Features
 
-- 🎯 **Generic Search**: Search for any type of business (restaurants, hotels, shops, etc.)
+- 🎯 **Generic Search**: Search for any business (restaurants, hotels, shops, etc.)
 - 🌍 **Multi-City Support**: Scrape multiple cities from a file or command line
 - 📊 **Comprehensive Data**: Extract company name, address, phone, website, rating, and reviews
 - 🤖 **Auto Cookie Handling**: Automatically handles Google's cookie consent popups
@@ -508,11 +510,11 @@ python google_maps_scraper.py --version
 
 ---
 
-**Made with ❤️ by [Your Name]**
+**Made with ❤️ by Pashalis Laoutaris**
 
 **Last Updated**: October 2025
 
-**Repository**: [github.com/YOUR_USERNAME/google-maps-scraper](https://github.com/YOUR_USERNAME/google-maps-scraper)
+**Repository**: [github.com/powergr/AGMS](https://github.com/powergr/AGMS)
 
 ![Python](https://img.shields.io/badge/topic-python-blue)
 ![Selenium](https://img.shields.io/badge/topic-selenium-blue)

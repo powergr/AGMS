@@ -18,7 +18,7 @@ import random
 import urllib.parse
 
 # Version
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -59,7 +59,6 @@ class GoogleMapsScraper:
         try:
             time.sleep(2)
             
-            # Try different button selectors for "Reject all" or "Accept all"
             consent_buttons = [
                 'button[aria-label*="Reject all"]',
                 'button[aria-label*="reject all"]',
@@ -83,7 +82,6 @@ class GoogleMapsScraper:
                 except:
                     continue
             
-            # Try XPath if CSS selectors fail
             try:
                 xpath_selectors = [
                     "//button[contains(text(), 'Reject all')]",
@@ -118,7 +116,6 @@ class GoogleMapsScraper:
             self.driver.get("https://www.google.com/maps")
             time.sleep(random.uniform(3, 5))
             
-            # Handle cookie consent popup
             self.handle_cookie_consent()
             
             search_box = self.wait.until(EC.presence_of_element_located((By.ID, "searchboxinput")))
@@ -148,10 +145,8 @@ class GoogleMapsScraper:
     
     def load_all_results(self):
         try:
-            # Find the scrollable results feed
             time.sleep(3)
             
-            # Try multiple selectors for the scrollable container
             scrollable_container = None
             container_selectors = [
                 'div[role="feed"]',
@@ -179,22 +174,18 @@ class GoogleMapsScraper:
             previous_count = 0
             
             while scroll_attempts < max_scrolls:
-                # Get current count before scrolling
                 current_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
                 current_count = len(current_elements)
                 
                 logger.info(f"Scroll {scroll_attempts + 1}: Currently {current_count} businesses visible")
                 
-                # Scroll the specific container to the bottom
                 self.driver.execute_script(
                     "arguments[0].scrollTop = arguments[0].scrollHeight", 
                     scrollable_container
                 )
                 
-                # Wait for new content to load
                 time.sleep(random.uniform(4, 6))
                 
-                # Check if we got new results after scrolling
                 new_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
                 new_count = len(new_elements)
                 
@@ -212,7 +203,6 @@ class GoogleMapsScraper:
                 
                 scroll_attempts += 1
                 
-                # Look for "You've reached the end" message
                 try:
                     end_messages = self.driver.find_elements(By.XPATH, 
                         "//*[contains(text(), 'reached the end') or contains(text(), 'no more results')]")
@@ -279,7 +269,6 @@ class GoogleMapsScraper:
                 if rating_match:
                     business_data['rating'] = rating_match.group(1)
                 
-                # Extract reviews - FIXED to capture correct numbers
                 review_patterns = [
                     r'(\d+)\s+review',
                     r'\((\d+)\)',
@@ -476,7 +465,6 @@ class GoogleMapsScraper:
     
     def extract_rating_reviews(self, business_data):
         try:
-            # Extract rating if not already found
             if not business_data['rating']:
                 rating_selectors = [
                     '.F7nice span[aria-hidden="true"]',
@@ -497,7 +485,6 @@ class GoogleMapsScraper:
                     except:
                         continue
             
-            # Extract review count if not already found - FIXED
             if not business_data['reviews']:
                 review_selectors = [
                     'button[jsaction*="pane.rating.moreReviews"]',
@@ -510,7 +497,6 @@ class GoogleMapsScraper:
                     try:
                         elem = self.driver.find_element(By.CSS_SELECTOR, selector)
                         
-                        # Try aria-label first (most reliable)
                         aria_label = elem.get_attribute('aria-label')
                         if aria_label:
                             review_match = re.search(r'(\d+)\s+(?:review|avis)', aria_label, re.IGNORECASE)
@@ -519,17 +505,14 @@ class GoogleMapsScraper:
                                 logger.debug(f"Found reviews from aria-label: {business_data['reviews']}")
                                 break
                         
-                        # Try text content
                         review_text = elem.text.strip()
                         if review_text:
-                            # Look for numbers in parentheses like "(123)"
                             review_match = re.search(r'\((\d+)\)', review_text)
                             if review_match:
                                 business_data['reviews'] = review_match.group(1)
                                 logger.debug(f"Found reviews from text: {business_data['reviews']}")
                                 break
                             
-                            # Look for pattern "123 reviews"
                             review_match = re.search(r'(\d+)\s+review', review_text, re.IGNORECASE)
                             if review_match:
                                 business_data['reviews'] = review_match.group(1)
@@ -568,32 +551,69 @@ class GoogleMapsScraper:
         return all_results
     
     def save_to_csv(self, filename):
+        """Save results to CSV with new format"""
         if not self.results:
             logger.warning("No results to save")
             return
         
-        fieldnames = ['company', 'address', 'phone', 'website', 'email', 'rating', 'reviews', 'city']
+        fieldnames = ['id', 'name', 'description', 'rating', 'reviewCount', 'phone', 'email', 'website', 'address', 'image', 'verified', 'tags']
         
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-            for result in self.results:
-                writer.writerow(result)
+            
+            for idx, result in enumerate(self.results, 1):
+                row = {
+                    'id': idx,
+                    'name': result.get('company', ''),
+                    'description': '',
+                    'rating': result.get('rating', ''),
+                    'reviewCount': result.get('reviews', ''),
+                    'phone': result.get('phone', ''),
+                    'email': result.get('email', ''),
+                    'website': result.get('website', ''),
+                    'address': result.get('address', ''),
+                    'image': '',
+                    'verified': 'true' if result.get('rating') else 'false',
+                    'tags': ''
+                }
+                writer.writerow(row)
         
         logger.info(f"Results saved to {filename}")
         print(f"Saved {len(self.results)} results to {filename}")
     
     def save_to_json(self, filename):
+        """Save results to JSON with new format"""
         if not self.results:
             logger.warning("No results to save")
             return
         
+        formatted_results = []
+        
+        for idx, result in enumerate(self.results, 1):
+            formatted_result = {
+                'id': idx,
+                'name': result.get('company', ''),
+                'description': '',
+                'rating': float(result.get('rating', 0)) if result.get('rating') else 0,
+                'reviewCount': int(result.get('reviews', 0)) if result.get('reviews') else 0,
+                'phone': result.get('phone', ''),
+                'email': result.get('email', ''),
+                'website': result.get('website', ''),
+                'address': result.get('address', ''),
+                'image': '',
+                'verified': bool(result.get('rating')),
+                'tags': []
+            }
+            formatted_results.append(formatted_result)
+        
         with open(filename, 'w', encoding='utf-8') as jsonfile:
-            json.dump(self.results, jsonfile, indent=2, ensure_ascii=False)
+            json.dump(formatted_results, jsonfile, indent=2, ensure_ascii=False)
         
         logger.info(f"Results saved to {filename}")
     
     def close(self):
+        """Close the browser"""
         if hasattr(self, 'driver'):
             self.driver.quit()
 
@@ -630,111 +650,41 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Search for sustainability companies in cities from file
   python %(prog)s --query "sustainability companies" --cities-file FASHION_CAPITALS.md
-  
-  # Search for restaurants in specific cities
   python %(prog)s --query "italian restaurants" --cities "New York, USA" "Paris, France"
-  
-  # Search for coffee shops with custom output
   python %(prog)s -q "coffee shops" -c "London, UK" "Tokyo, Japan" -o coffee_shops.csv
-  
-  # Run in headless mode with limit
   python %(prog)s -q "hotels" --cities-file cities.txt --headless --limit 5
-  
-  # Test mode to verify before scraping all cities
   python %(prog)s -q "gyms" -c "Berlin, Germany" --test
         '''
     )
     
-    # Version argument
-    parser.add_argument(
-        '-v', '--version',
-        action='version',
-        version=f'%(prog)s {__version__}'
-    )
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {__version__}')
+    parser.add_argument('-q', '--query', required=True, help='Search query for businesses')
     
-    # Required arguments
-    parser.add_argument(
-        '-q', '--query',
-        required=True,
-        help='Search query for businesses (e.g., "sustainability companies", "italian restaurants", "coffee shops")'
-    )
-    
-    # City input (either file or list)
     city_group = parser.add_mutually_exclusive_group(required=True)
-    city_group.add_argument(
-        '-c', '--cities',
-        nargs='+',
-        help='List of cities to search (e.g., "New York, USA" "Paris, France")'
-    )
-    city_group.add_argument(
-        '-f', '--cities-file',
-        help='File containing cities (one per line or markdown format)'
-    )
+    city_group.add_argument('-c', '--cities', nargs='+', help='List of cities to search')
+    city_group.add_argument('-f', '--cities-file', help='File containing cities')
     
-    # Output options
-    parser.add_argument(
-        '-o', '--output',
-        default='google_maps_results',
-        help='Output filename without extension (default: google_maps_results)'
-    )
-    parser.add_argument(
-        '--format',
-        choices=['csv', 'json', 'both'],
-        default='both',
-        help='Output format (default: both)'
-    )
-    
-    # Scraping options
-    parser.add_argument(
-        '--headless',
-        action='store_true',
-        help='Run browser in headless mode (no GUI)'
-    )
-    parser.add_argument(
-        '--limit',
-        type=int,
-        help='Limit number of cities to process'
-    )
-    parser.add_argument(
-        '--test',
-        action='store_true',
-        help='Test mode: scrape only first city to verify settings'
-    )
-    
-    # Advanced options
-    parser.add_argument(
-        '--delay',
-        type=int,
-        default=10,
-        help='Delay between cities in seconds (default: 10)'
-    )
-    parser.add_argument(
-        '--max-results',
-        type=int,
-        help='Maximum results per city (default: all)'
-    )
-    parser.add_argument(
-        '--verbose',
-        action='store_true',
-        help='Verbose output (show detailed logs)'
-    )
+    parser.add_argument('-o', '--output', default='google_maps_results', help='Output filename without extension')
+    parser.add_argument('--format', choices=['csv', 'json', 'both'], default='both', help='Output format')
+    parser.add_argument('--headless', action='store_true', help='Run browser in headless mode')
+    parser.add_argument('--limit', type=int, help='Limit number of cities to process')
+    parser.add_argument('--test', action='store_true', help='Test mode: scrape only first city')
+    parser.add_argument('--delay', type=int, default=10, help='Delay between cities in seconds')
+    parser.add_argument('--max-results', type=int, help='Maximum results per city')
+    parser.add_argument('--verbose', action='store_true', help='Verbose output')
     
     return parser.parse_args()
 
 def main():
     args = parse_arguments()
     
-    # Set logging level
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    # Display version and header
     print(f"Google Maps Scraper v{__version__}")
     print("=" * 60)
     
-    # Load cities
     if args.cities_file:
         cities = load_cities_from_file(args.cities_file)
         if not cities:
@@ -743,7 +693,6 @@ def main():
     else:
         cities = args.cities
     
-    # Apply limit or test mode
     if args.test:
         cities = cities[:1]
         print(f"TEST MODE: Processing only first city: {cities[0]}")
@@ -751,7 +700,6 @@ def main():
         cities = cities[:args.limit]
         print(f"Limited to first {len(cities)} cities")
     
-    # Display configuration
     print("Configuration")
     print("-" * 60)
     print(f"Search Query: {args.query}")
@@ -762,14 +710,12 @@ def main():
     print(f"Delay between cities: {args.delay}s")
     print("=" * 60)
     
-    # Confirm before starting
     if not args.test:
         response = input("\nProceed with scraping? (y/n): ").lower().strip()
         if response != 'y':
             print("Scraping cancelled.")
             sys.exit(0)
     
-    # Initialize scraper
     print("\nInitializing scraper...")
     scraper = GoogleMapsScraper(headless=args.headless)
     
@@ -778,14 +724,12 @@ def main():
         results = scraper.scrape_cities(cities, args.query)
         
         if results:
-            # Save results
             print("\nSaving results...")
             if args.format in ['csv', 'both']:
                 scraper.save_to_csv(f"{args.output}.csv")
             if args.format in ['json', 'both']:
                 scraper.save_to_json(f"{args.output}.json")
             
-            # Display statistics
             print(f"\n{'=' * 60}")
             print("Scraping Results")
             print(f"{'=' * 60}")
@@ -804,7 +748,6 @@ def main():
             print(f"📞 Companies with phones: {with_phones} ({with_phones/len(results)*100:.1f}%)")
             print(f"📍 Companies with addresses: {with_addresses} ({with_addresses/len(results)*100:.1f}%)")
             
-            # Show sample results
             print(f"\n🔍 Sample results:")
             for i, result in enumerate(results[:3], 1):
                 print(f"\n{i}. {result['company']} ({result['city']})")

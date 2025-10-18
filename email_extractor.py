@@ -1,6 +1,6 @@
 """
 Email Extractor - Extract business emails from websites
-Version: 1.0.0
+Version: 1.1.1
 Author: Email Extractor Team
 License: MIT
 """
@@ -17,8 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import sys
 
-__version__ = "1.1.0"
-__author__ = "Email Extractor Team"
+__version__ = "1.1.1"
+__author__ = "Pashalis Laoutaris"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -44,10 +44,18 @@ class EmailExtractor:
             r'\b[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
         )
         
-        # Pages where emails are commonly found
+        # Pages where emails are commonly found (expanded list)
         self.contact_pages = [
-            '', 'contact', 'contact-us', 'about', 'about-us', 
-            'team', 'support'
+            '', 'contact', 'contact-us', 'contactus', 'contact_us',
+            'about', 'about-us', 'aboutus', 'about_us',
+            'team', 'our-team', 'ourteam',
+            'support', 'help', 'customer-service',
+            'privacy', 'privacy-policy', 'privacypolicy',
+            'terms', 'terms-of-service', 'termsofservice', 'legal',
+            'our-story', 'ourstory', 'story', 'who-we-are',
+            'company', 'impressum', 'imprint',
+            'partners', 'partnership',
+            'press', 'media', 'news'
         ]
         
         # Domains to exclude (not business emails)
@@ -200,9 +208,21 @@ class EmailExtractor:
                 logger.info(f"Found {len(unique_emails)} email(s): {', '.join(unique_emails)}")
                 return unique_emails
         
-        # Otherwise, try contact pages
+        # Otherwise, try contact pages (expanded search)
         base_url = website_url.rstrip('/')
-        for page in ['contact', 'about', 'contact-us']:
+        pages_to_try = [
+            'contact', 'contact-us', 'contactus',
+            'about', 'about-us', 'aboutus',
+            'privacy', 'privacy-policy',
+            'terms', 'legal',
+            'our-story', 'story',
+            'team', 'our-team',
+            'support', 'help',
+            'impressum', 'imprint',
+            'company'
+        ]
+        
+        for page in pages_to_try:
             page_url = f"{base_url}/{page}"
             
             html_content = self.fetch_page(page_url)
@@ -328,6 +348,12 @@ class EmailExtractor:
         # Process businesses
         updated_businesses = self.process_businesses(businesses)
         
+        # Sort by ID (convert to int if possible, otherwise keep as string)
+        try:
+            updated_businesses.sort(key=lambda x: int(x.get('id', 0)))
+        except (ValueError, TypeError):
+            updated_businesses.sort(key=lambda x: str(x.get('id', '')))
+        
         # Save results
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(updated_businesses, f, indent=2, ensure_ascii=False)
@@ -366,6 +392,12 @@ class EmailExtractor:
         # Process businesses
         updated_businesses = self.process_businesses(businesses)
         
+        # Sort by ID (convert to int if possible, otherwise keep as string)
+        try:
+            updated_businesses.sort(key=lambda x: int(x.get('id', 0)))
+        except (ValueError, TypeError):
+            updated_businesses.sort(key=lambda x: str(x.get('id', '')))
+        
         # Save results
         if updated_businesses:
             fieldnames = list(updated_businesses[0].keys())
@@ -393,9 +425,9 @@ def print_version():
 def print_help():
     """Print detailed help information"""
     help_text = f"""
-╔══════════════════════════════════════════════════════════════╗
-║              Email Extractor v{__version__}                          ║
-╚══════════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════════╗
+║              Email Extractor v{__version__}                           ║
+╚═══════════════════════════════════════════════════════════════╝
 
 DESCRIPTION:
     Extract business email addresses from company websites by analyzing

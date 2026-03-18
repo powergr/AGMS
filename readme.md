@@ -4,9 +4,9 @@ A powerful, generic Python-based web scraper for extracting business information
 
 **Added an email extractor, because Google Maps does not have emails in companies.**
 
-![Python Version](https://img.shields.io/badge/python-3.7%2B-blue)
+![Python Version](https://img.shields.io/badge/python-3.14%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.1.0-orange)
+![Version](https://img.shields.io/badge/version-1.3.0-orange)
 ![Status](https://img.shields.io/badge/status-active-success)
 
 ## ✨ Features
@@ -44,7 +44,7 @@ A powerful, generic Python-based web scraper for extracting business information
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/google-maps-scraper.git
+git clone https://github.com/powergr/AGMS.git
 cd google-maps-scraper
 ```
 
@@ -61,7 +61,7 @@ venv\Scripts\activate
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate
+source venv/Scripts/activate
 ```
 
 ### Step 3: Install Dependencies
@@ -348,7 +348,7 @@ The scraper includes built-in delays:
 
 ### Version History
 
-**v1.1.0** (Current)
+**v1.3.0** (Current)
 
 - ✅ Generic business search
 - ✅ Multi-city support
@@ -384,7 +384,7 @@ Contributions are welcome! Here's how you can help:
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/google-maps-scraper.git
+git clone https://github.com/powergr/AGMS.git
 cd google-maps-scraper
 
 # Create virtual environment
@@ -420,9 +420,9 @@ The authors and contributors are not responsible for any misuse of this tool.
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/YOUR_USERNAME/google-maps-scraper/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/YOUR_USERNAME/google-maps-scraper/discussions)
-- **Email**: [your.email@example.com]
+- **Issues**: [GitHub Issues](https://github.com/powergr/AGMS/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/powergr/AGMS/discussions)
+- **Email**: [powergr@gmail.com]
 
 ## 🌟 Star the Project
 
@@ -430,18 +430,16 @@ If you find this project useful, please consider giving it a star on GitHub! It 
 
 ## 📈 Roadmap
 
-### Planned Features
+### Planned Features (V1.3.0)
 
-- [ ] Support for more data fields (hours, photos, etc.)
-- [ ] Proxy support for large-scale scraping
-- [ ] Database export (SQLite, PostgreSQL)
-- [ ] GUI interface
-- [ ] Multi-threaded scraping
-- [ ] Email extraction improvements
-- [ ] Export to Excel format
-- [ ] Scheduling and automation features
-- [ ] Docker container
-- [ ] API endpoint option
+- ✅ Support for more data fields (hours, photos, etc.)
+- ✅ Proxy support for large-scale scraping
+- ✅ Database export (SQLite, PostgreSQL)
+- ✅ GUI interface
+- ✅ Multi-threaded scraping
+- ✅ Email extraction improvements
+- ✅ Export to Excel format
+- ✅ Scheduling and automation features
 
 ### Future Improvements
 
@@ -512,7 +510,7 @@ python google_maps_scraper.py --version
 
 ## Made with ❤️ by Pashalis Laoutaris
 
-**Last Updated**: October 2025
+**Last Updated**: March 2026
 
 **Repository**: [github.com/powergr/AGMS](https://github.com/powergr/AGMS)
 

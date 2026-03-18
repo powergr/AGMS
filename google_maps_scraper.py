@@ -133,26 +133,26 @@ class GoogleMapsScraper:
         logger.info(f"Searching for: {search_term}")
         
         try:
-            self.driver.get("https://www.google.com/maps")
-            time.sleep(random.uniform(3, 5))
+            # --- FIX: Use Direct URL Search instead of typing ---
+            # This is much more reliable and skips the search box entirely
+            encoded_query = urllib.parse.quote_plus(search_term)
+            search_url = f"https://www.google.com/maps/search/{encoded_query}"
             
+            self.driver.get(search_url)
+            time.sleep(random.uniform(4, 6))
+            
+            # Handle any cookie popups that appear
             self.handle_cookie_consent()
             
-            search_box = self.wait.until(EC.presence_of_element_located((By.ID, "searchboxinput")))
-            search_box.clear()
-            
-            for char in search_term:
-                search_box.send_keys(char)
-                time.sleep(random.uniform(0.05, 0.15))
-            
-            search_box.send_keys(Keys.RETURN)
-            time.sleep(random.uniform(6, 10))
-            
+            # Wait for the results panel to load
             try:
-                self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, '[role="main"]')))
+                # Look for the feed container or actual business listings
+                self.wait.until(EC.presence_of_element_located((
+                    By.CSS_SELECTOR, 'div[role="feed"], div.m6QErb[aria-label], .hfpxzc'
+                )))
                 logger.info("Search results loaded")
             except TimeoutException:
-                logger.warning("Results panel not found")
+                logger.warning("Results panel not found (might be no results for this query)")
                 return []
             
             self.load_all_results()
@@ -166,32 +166,9 @@ class GoogleMapsScraper:
     def load_all_results(self):
         try:
             time.sleep(3)
-            
-            scrollable_container = None
-            container_selectors = [
-                'div[role="feed"]',
-                'div.m6QErb[aria-label]',
-                '[role="main"] div[tabindex="-1"]',
-                'div[aria-label][role="feed"]'
-            ]
-            
-            for selector in container_selectors:
-                try:
-                    scrollable_container = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if scrollable_container:
-                        logger.info(f"Found scrollable container: {selector}")
-                        break
-                except:
-                    continue
-            
-            if not scrollable_container:
-                logger.warning("Could not find scrollable container, using main")
-                scrollable_container = self.driver.find_element(By.CSS_SELECTOR, '[role="main"]')
-            
             scroll_attempts = 0
             max_scrolls = 25
             no_change_count = 0
-            previous_count = 0
             
             while scroll_attempts < max_scrolls:
                 current_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
@@ -199,11 +176,29 @@ class GoogleMapsScraper:
                 
                 logger.info(f"Scroll {scroll_attempts + 1}: Currently {current_count} businesses visible")
                 
-                self.driver.execute_script(
-                    "arguments[0].scrollTop = arguments[0].scrollHeight", 
-                    scrollable_container
-                )
+                if current_count > 0:
+                    # Method 1: Scroll the last known business into view
+                    last_element = current_elements[-1]
+                    try:
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", last_element)
+                    except:
+                        pass
+                    
+                    # Method 2: Send PAGE_DOWN key directly to the element (simulates a human pressing down)
+                    try:
+                        last_element.send_keys(Keys.PAGE_DOWN)
+                        last_element.send_keys(Keys.PAGE_DOWN)
+                    except:
+                        pass
                 
+                # Method 3: Fallback standard container scroll
+                try:
+                    scrollable_container = self.driver.find_element(By.CSS_SELECTOR, 'div[role="feed"]')
+                    self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_container)
+                except:
+                    pass
+                
+                # Wait for Google to fetch the new data from their server
                 time.sleep(random.uniform(4, 6))
                 
                 new_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
@@ -212,7 +207,6 @@ class GoogleMapsScraper:
                 if new_count > current_count:
                     logger.info(f"✓ Loaded {new_count - current_count} more businesses (total: {new_count})")
                     no_change_count = 0
-                    previous_count = new_count
                 else:
                     no_change_count += 1
                     logger.info(f"No new businesses loaded (attempt {no_change_count}/5)")
@@ -223,11 +217,12 @@ class GoogleMapsScraper:
                 
                 scroll_attempts += 1
                 
+                # Check if Google explicitly says there are no more results
                 try:
                     end_messages = self.driver.find_elements(By.XPATH, 
                         "//*[contains(text(), 'reached the end') or contains(text(), 'no more results')]")
                     if end_messages:
-                        logger.info("Reached end of results")
+                        logger.info("Reached explicitly stated end of results")
                         break
                 except:
                     pass
@@ -244,12 +239,23 @@ class GoogleMapsScraper:
         businesses = []
         
         try:
-            business_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
-            logger.info(f"Found {len(business_elements)} businesses")
+            # Get the total count first
+            total_elements = len(self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc'))
+            logger.info(f"Found {total_elements} businesses. Starting extraction...")
             
-            for i, element in enumerate(business_elements):
+            # Loop using index, re-fetching elements every time to prevent StaleElementReference
+            for i in range(total_elements):
                 try:
-                    logger.info(f"Processing business {i+1}/{len(business_elements)}")
+                    logger.info(f"Processing business {i+1}/{total_elements}")
+                    
+                    # RE-FETCH the elements list to ensure they are fresh
+                    current_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
+                    
+                    if i >= len(current_elements):
+                        logger.warning(f"Element {i} no longer exists in DOM. Skipping.")
+                        continue
+                        
+                    element = current_elements[i]
                     business_data = self.extract_business_info(element)
                     
                     if business_data and business_data.get('company'):
@@ -260,7 +266,7 @@ class GoogleMapsScraper:
                         if business_data.get('email'):
                             logger.info(f"  Email: {business_data['email']}")
                     
-                    time.sleep(random.uniform(1, 2))
+                    time.sleep(random.uniform(1.5, 2.5))
                     
                 except Exception as e:
                     logger.warning(f"Error processing business {i+1}: {e}")
@@ -376,20 +382,40 @@ class GoogleMapsScraper:
     # --- NEW: Extract Hours ---
     def extract_hours(self, business_data):
         try:
+            # 1. Try the standard Google Maps hours container first
+            try:
+                oh_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-item-id="oh"]')
+                if oh_elements:
+                    text = oh_elements[0].get_attribute('aria-label')
+                    if not text:
+                        text = oh_elements[0].text
+                    if text and len(text) > 3:
+                        business_data['hours'] = text.replace('\u202f', ' ').replace('\n', ' - ').strip()
+                        return
+            except:
+                pass
+
+            # 2. Try generic text matching for hours
             hour_selectors = [
-                '[data-item-id="oh"] .ZqMh1',
-                'div[aria-label*="Hours"]',
-                '.t39OBf.fontBodyMedium'
+                'div[aria-label*="Open ⋅ Closes"]',
+                'div[aria-label*="Closed ⋅ Opens"]',
+                'div[aria-label*="Open 24 hours"]',
+                'div[aria-label*="Temporarily closed"]',
+                '.t39OBf'
             ]
+            
             for selector in hour_selectors:
                 try:
                     elem = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    hours_text = elem.get_attribute('aria-label')
-                    if hours_text:
-                        business_data['hours'] = hours_text.replace('\u202f', ' ').strip()
-                        break
+                    text = elem.get_attribute('aria-label')
+                    if not text:
+                        text = elem.text
+                    if text and len(text) > 3:
+                        business_data['hours'] = text.replace('\u202f', ' ').replace('\n', ' - ').strip()
+                        return
                 except:
                     continue
+                    
         except Exception as e:
             logger.debug(f"Could not extract hours: {e}")
 

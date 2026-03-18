@@ -20,6 +20,8 @@ chromedriver.log
 # Output files
 *.csv
 *.json
+*.db
+*.xlsx
 output/*.csv
 output/*.json
 !examples/*.csv

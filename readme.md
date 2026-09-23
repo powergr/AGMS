@@ -9,19 +9,24 @@ The script has updated to work with all the latest changes from Google. Please o
 
 ![Python Version](https://img.shields.io/badge/python-3.14%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.3.0-orange)
+![Version](https://img.shields.io/badge/version-1.3.1-orange)
 ![Status](https://img.shields.io/badge/status-active-success)
 
 ## ✨ Features
 
 - 🎯 **Generic Search**: Search for any business (restaurants, hotels, shops, etc.)
 - 🌍 **Multi-City Support**: Scrape multiple cities from a file or command line
-- 📊 **Comprehensive Data**: Extract company name, address, phone, website, rating, and reviews
+- 📊 **Comprehensive Data**: Company name, address, phone, website, email, rating, reviews, hours, and photo
+- ✉️ **Email Extraction**: Automatically scans each business's website for a contact email
 - 🤖 **Auto Cookie Handling**: Automatically handles Google's cookie consent popups
-- 💾 **Multiple Formats**: Export data to CSV, JSON, or both
+- 💾 **Multiple Formats**: Export to CSV, JSON, Excel, SQLite, or PostgreSQL, in any combination
 - 🔍 **Smart Pagination**: Automatically loads all available results
 - 🎭 **Headless Mode**: Run with or without visible browser
 - ⚡ **CLI Interface**: Easy-to-use command-line interface with multiple options
+- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with the same capabilities as the CLI — see [docs/GUI_setup_guide.md](docs/GUI_setup_guide.md) and [docs/CLI-vs-GUI.md](docs/CLI-vs-GUI.md)
+- 🧵 **Multi-Threaded**: Run several browsers in parallel to scrape faster
+- 🌐 **Proxy Support**: Route requests through a proxy server
+- ⏰ **Scheduling**: Re-run a job automatically on a daily, hourly, or weekly interval
 - 🧪 **Test Mode**: Verify settings before running full scraping job
 
 ## 📋 Table of Contents
@@ -33,6 +38,7 @@ The script has updated to work with all the latest changes from Google. Please o
 - [Examples](#examples)
 - [Output Format](#output-format)
 - [Troubleshooting](#troubleshooting)
+- [Known Limitations](#known-limitations)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -48,7 +54,7 @@ The script has updated to work with all the latest changes from Google. Please o
 
 ```bash
 git clone https://github.com/powergr/AGMS.git
-cd google-maps-scraper
+cd AGMS
 ```
 
 ### Step 2: Create Virtual Environment (Recommended)
@@ -64,7 +70,7 @@ venv\Scripts\activate
 
 ```bash
 python3 -m venv venv
-source venv/Scripts/activate
+source venv/bin/activate
 ```
 
 ### Step 3: Install Dependencies
@@ -120,7 +126,7 @@ python google_maps_scraper.py -q "SEARCH_QUERY" [-c CITIES | -f CITIES_FILE] [OP
 | Option           | Description                             | Default               |
 | ---------------- | --------------------------------------- | --------------------- |
 | `-o`, `--output` | Output filename (without extension)     | `google_maps_results` |
-| `--format`       | Output format: `csv`, `json`, or `both` | `both`                |
+| `--format`       | One or more of `csv`, `json`, `excel`, `both` (space-separated, e.g. `--format csv excel`) | `both` |
 
 ### Scraping Options
 
@@ -129,14 +135,19 @@ python google_maps_scraper.py -q "SEARCH_QUERY" [-c CITIES | -f CITIES_FILE] [OP
 | `--headless` | Run browser in headless mode (no GUI) | `False`    |
 | `--limit`    | Limit number of cities to process     | All cities |
 | `--test`     | Test mode: scrape only first city     | `False`    |
+| `--workers`  | Parallel workers (concurrent browsers, multi-threaded scraping) | `1` |
+| `--proxy`    | Proxy server, e.g. `http://ip:port`   | None       |
+| `--schedule` | Repeat the whole run on an interval: `daily`, `hourly`, or `weekly` | None |
 
 ### Advanced Options
 
 | Option          | Description                    | Default     |
 | --------------- | ------------------------------ | ----------- |
 | `--delay`       | Delay between cities (seconds) | `10`        |
-| `--max-results` | Maximum results per city       | All results |
+| `--max-results` | Maximum results per city _(accepted but not currently implemented — see [Known Limitations](#known-limitations))_ | All results |
 | `--verbose`     | Show detailed logs             | `False`     |
+| `--sqlite`      | Also save results to a SQLite DB file, e.g. `data.db` | None |
+| `--postgres`    | Also save results to PostgreSQL via a connection string, e.g. `postgresql://user:pass@localhost/dbname` | None |
 
 ### Help & Version
 
@@ -222,31 +233,46 @@ The scraper handles both formats automatically!
 
 ## Output Format
 
+Both CSV and JSON exports share the same field set (see `format_results_for_export` in
+[google_maps_scraper.py](google_maps_scraper.py)):
+
 ### CSV Output
 
-| Column  | Description       | Example                           |
-| ------- | ----------------- | --------------------------------- |
-| company | Business name     | "Sustainable Fashion Co."         |
-| address | Full address      | "123 Main St, New York, NY 10001" |
-| phone   | Phone number      | "+1 212-555-0123"                 |
-| website | Business website  | ["https://example.com"]           |
-| email   | Email address     | (Usually empty from Maps)         |
-| rating  | Average rating    | "4.5"                             |
-| reviews | Number of reviews | "234"                             |
-| city    | City searched     | "New York, USA"                   |
+| Column      | Description                                    | Example                            |
+| ----------- | ------------------------------------------------ | ------------------------------------ |
+| id          | Row number within this export                  | 1                                   |
+| name        | Business name                                  | "Sustainable Fashion Co."          |
+| description | Reserved for future use, currently blank       | ""                                  |
+| rating      | Average rating                                 | "4.5"                               |
+| reviewCount | Number of reviews                              | "234"                               |
+| phone       | Phone number                                   | "+1 212-555-0123"                   |
+| email       | Email address scraped from the business website (see [Email Extraction](#new-commands)) | "" if none found |
+| website     | Business website                               | "https://example.com"               |
+| address     | Full address                                   | "123 Main St, New York, NY 10001"   |
+| hours       | Opening hours, if shown on the listing         | "Mon-Fri 9 AM-5 PM"                 |
+| image       | URL of the listing's primary photo             | "https://..."                       |
+| verified    | `"true"` if a rating was found, else `"false"` | "true"                              |
+| tags        | Reserved for future use, currently blank       | ""                                  |
+| city        | City searched                                  | "New York, USA"                     |
 
 ### JSON Output
 
 ```json
 [
   {
-    "company": "Sustainable Fashion Co.",
-    "address": "123 Main St, New York, NY 10001, USA",
-    "phone": "+1 212-555-0123",
-    "website": "https://example.com",
-    "email": "",
+    "id": 1,
+    "name": "Sustainable Fashion Co.",
+    "description": "",
     "rating": "4.5",
-    "reviews": "234",
+    "reviewCount": "234",
+    "phone": "+1 212-555-0123",
+    "email": "",
+    "website": "https://example.com",
+    "address": "123 Main St, New York, NY 10001, USA",
+    "hours": "Mon-Fri 9 AM-5 PM",
+    "image": "https://example.com/photo.jpg",
+    "verified": "true",
+    "tags": "",
     "city": "New York, USA"
   }
 ]
@@ -296,6 +322,20 @@ Run with verbose flag to see detailed logs:
 ```bash
 python google_maps_scraper.py -q "restaurants" -c "Paris, France" --verbose
 ```
+
+## Known Limitations
+
+- **`--max-results` is not implemented yet.** The flag is accepted (and shown in `--help`), but the
+  scraper does not currently cap how many results it extracts per city — every business found is
+  still scraped. Track/vote on this if you need it enforced.
+- **Non-interactive runs need `--test` or `--schedule`.** Without one of those two flags, the CLI
+  pauses for a `y/n` confirmation before scraping. If you're wiring this into Task Scheduler, cron,
+  or another unattended pipeline, add `--test` (for a dry run) or `--schedule` — a bare
+  `python google_maps_scraper.py -q ... -f cities.txt --headless` will hang (or crash with
+  `EOFError`) waiting for input that never arrives.
+- **`--sqlite`/`--postgres` always append.** There's no deduplication, so repeated runs (especially
+  with `--schedule`) will insert the same businesses again on every run rather than updating existing
+  rows.
 
 ## Performance Tips
 
@@ -351,7 +391,24 @@ The scraper includes built-in delays:
 
 ### Version History
 
-**v1.3.0** (Current)
+**v1.3.1** (Current)
+
+- ✅ GUI now has full feature parity with the CLI: proxy support, multi-threaded workers, Excel/SQLite/PostgreSQL export, and scheduling (daily/hourly/weekly)
+- ✅ Fixed the GUI's CSV/JSON export, which was missing the `hours`/`city` fields and always leaving `image` blank — it now shares the CLI's own exporter code, so both versions produce identical output
+- ✅ The GUI's "Verbose Logging" checkbox now actually works, and the detailed per-business logs from the scraping engine show up in the GUI's log panel
+- ✅ Fixed a threading bug where the GUI updated its progress bar and logs directly from a background thread, which is unsafe and could misbehave once multiple workers were involved
+
+**v1.3.0**
+
+- ✅ Added `hours` and `image` (primary photo) fields to every export
+- ✅ Proxy support (`--proxy`)
+- ✅ Multi-threaded scraping (`--workers`)
+- ✅ Database export to SQLite (`--sqlite`) and PostgreSQL (`--postgres`)
+- ✅ Excel export (`--format excel`)
+- ✅ Scheduling and automation (`--schedule daily|hourly|weekly`)
+- ✅ Automatic email extraction from each business's website
+
+**v1.0.0 – v1.2.0 (baseline)**
 
 - ✅ Generic business search
 - ✅ Multi-city support
@@ -388,7 +445,7 @@ Contributions are welcome! Here's how you can help:
 ```bash
 # Clone the repository
 git clone https://github.com/powergr/AGMS.git
-cd google-maps-scraper
+cd AGMS
 
 # Create virtual environment
 python -m venv venv
@@ -433,7 +490,9 @@ If you find this project useful, please consider giving it a star on GitHub! It 
 
 ## 📈 Roadmap
 
-### Planned Features (V1.3.0)
+### Shipped in v1.3.0 – v1.3.1
+
+_(originally CLI-only in v1.3.0; the GUI reached the same feature set in v1.3.1 — see [Version History](#version-history))_
 
 - ✅ Support for more data fields (hours, photos, etc.)
 - ✅ Proxy support for large-scale scraping
@@ -553,7 +612,9 @@ python google_maps_scraper.py --version
    python google_maps_scraper.py -q "coffee shops" -c "Berlin" --schedule daily
    ```
 
-   _Note: This will keep the Python script running in the background and execute it every 24 hours._
+   _Note: This runs the job immediately once, then keeps the script running in the foreground and
+   re-runs it at the start of each following interval (`daily` = every midnight, `hourly` = every
+   hour, `weekly` = every week) — press Ctrl+C to stop it._
 
 6. **Email Extraction:**
    This works entirely in the background automatically. The script reads the `website` URL generated by Google Maps, uses `requests` and `BeautifulSoup` to scan the homepage html, checks for `<a href="mailto:...">` attributes, and falls back to a RegEx pattern to find unlinked emails on the landing page. It populates the new `email` field in exports.
@@ -562,7 +623,7 @@ python google_maps_scraper.py --version
 
 ## Made with ❤️ by Pashalis Laoutaris
 
-**Last Updated**: March 2026
+**Last Updated**: September 2026
 
 **Repository**: [github.com/powergr/AGMS](https://github.com/powergr/AGMS)
 

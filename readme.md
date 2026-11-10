@@ -123,31 +123,31 @@ python google_maps_scraper.py -q "SEARCH_QUERY" [-c CITIES | -f CITIES_FILE] [OP
 
 ### Output Options
 
-| Option           | Description                             | Default               |
-| ---------------- | --------------------------------------- | --------------------- |
-| `-o`, `--output` | Output filename (without extension)     | `google_maps_results` |
-| `--format`       | One or more of `csv`, `json`, `excel`, `both` (space-separated, e.g. `--format csv excel`) | `both` |
+| Option           | Description                                                                                | Default               |
+| ---------------- | ------------------------------------------------------------------------------------------ | --------------------- |
+| `-o`, `--output` | Output filename (without extension)                                                        | `google_maps_results` |
+| `--format`       | One or more of `csv`, `json`, `excel`, `both` (space-separated, e.g. `--format csv excel`) | `both`                |
 
 ### Scraping Options
 
-| Option       | Description                           | Default    |
-| ------------ | ------------------------------------- | ---------- |
-| `--headless` | Run browser in headless mode (no GUI) | `False`    |
-| `--limit`    | Limit number of cities to process     | All cities |
-| `--test`     | Test mode: scrape only first city     | `False`    |
-| `--workers`  | Parallel workers (concurrent browsers, multi-threaded scraping) | `1` |
-| `--proxy`    | Proxy server, e.g. `http://ip:port`   | None       |
-| `--schedule` | Repeat the whole run on an interval: `daily`, `hourly`, or `weekly` | None |
+| Option       | Description                                                         | Default    |
+| ------------ | ------------------------------------------------------------------- | ---------- |
+| `--headless` | Run browser in headless mode (no GUI)                               | `False`    |
+| `--limit`    | Limit number of cities to process                                   | All cities |
+| `--test`     | Test mode: scrape only first city                                   | `False`    |
+| `--workers`  | Parallel workers (concurrent browsers, multi-threaded scraping)     | `1`        |
+| `--proxy`    | Proxy server, e.g. `http://ip:port`                                 | None       |
+| `--schedule` | Repeat the whole run on an interval: `daily`, `hourly`, or `weekly` | None       |
 
 ### Advanced Options
 
-| Option          | Description                    | Default     |
-| --------------- | ------------------------------ | ----------- |
-| `--delay`       | Delay between cities (seconds) | `10`        |
+| Option          | Description                                                                                                       | Default     |
+| --------------- | ----------------------------------------------------------------------------------------------------------------- | ----------- |
+| `--delay`       | Delay between cities (seconds)                                                                                    | `10`        |
 | `--max-results` | Maximum results per city _(accepted but not currently implemented — see [Known Limitations](#known-limitations))_ | All results |
-| `--verbose`     | Show detailed logs             | `False`     |
-| `--sqlite`      | Also save results to a SQLite DB file, e.g. `data.db` | None |
-| `--postgres`    | Also save results to PostgreSQL via a connection string, e.g. `postgresql://user:pass@localhost/dbname` | None |
+| `--verbose`     | Show detailed logs                                                                                                | `False`     |
+| `--sqlite`      | Also save results to a SQLite DB file, e.g. `data.db`                                                             | None        |
+| `--postgres`    | Also save results to PostgreSQL via a connection string, e.g. `postgresql://user:pass@localhost/dbname`           | None        |
 
 ### Help & Version
 
@@ -238,22 +238,22 @@ Both CSV and JSON exports share the same field set (see `format_results_for_expo
 
 ### CSV Output
 
-| Column      | Description                                    | Example                            |
-| ----------- | ------------------------------------------------ | ------------------------------------ |
-| id          | Row number within this export                  | 1                                   |
-| name        | Business name                                  | "Sustainable Fashion Co."          |
-| description | Reserved for future use, currently blank       | ""                                  |
-| rating      | Average rating                                 | "4.5"                               |
-| reviewCount | Number of reviews                              | "234"                               |
-| phone       | Phone number                                   | "+1 212-555-0123"                   |
-| email       | Email address scraped from the business website (see [Email Extraction](#new-commands)) | "" if none found |
-| website     | Business website                               | "https://example.com"               |
-| address     | Full address                                   | "123 Main St, New York, NY 10001"   |
-| hours       | Opening hours, if shown on the listing         | "Mon-Fri 9 AM-5 PM"                 |
-| image       | URL of the listing's primary photo             | "https://..."                       |
-| verified    | `"true"` if a rating was found, else `"false"` | "true"                              |
-| tags        | Reserved for future use, currently blank       | ""                                  |
-| city        | City searched                                  | "New York, USA"                     |
+| Column      | Description                                                                             | Example                           |
+| ----------- | --------------------------------------------------------------------------------------- | --------------------------------- |
+| id          | Row number within this export                                                           | 1                                 |
+| name        | Business name                                                                           | "Sustainable Fashion Co."         |
+| description | Reserved for future use, currently blank                                                | ""                                |
+| rating      | Average rating                                                                          | "4.5"                             |
+| reviewCount | Number of reviews                                                                       | "234"                             |
+| phone       | Phone number                                                                            | "+1 212-555-0123"                 |
+| email       | Email address scraped from the business website (see [Email Extraction](#new-commands)) | "" if none found                  |
+| website     | Business website                                                                        | "https://..."                     |
+| address     | Full address                                                                            | "123 Main St, New York, NY 10001" |
+| hours       | Opening hours, if shown on the listing                                                  | "Mon-Fri 9 AM-5 PM"               |
+| image       | URL of the listing's primary photo                                                      | "https://..."                     |
+| verified    | `"true"` if a rating was found, else `"false"`                                          | "true"                            |
+| tags        | Reserved for future use, currently blank                                                | ""                                |
+| city        | City searched                                                                           | "New York, USA"                   |
 
 ### JSON Output
 
@@ -398,7 +398,7 @@ The scraper includes built-in delays:
 - ✅ The GUI's "Verbose Logging" checkbox now actually works, and the detailed per-business logs from the scraping engine show up in the GUI's log panel
 - ✅ Fixed a threading bug where the GUI updated its progress bar and logs directly from a background thread, which is unsafe and could misbehave once multiple workers were involved
 
-**v1.3.0**
+## v1.3.0
 
 - ✅ Added `hours` and `image` (primary photo) fields to every export
 - ✅ Proxy support (`--proxy`)
@@ -408,7 +408,7 @@ The scraper includes built-in delays:
 - ✅ Scheduling and automation (`--schedule daily|hourly|weekly`)
 - ✅ Automatic email extraction from each business's website
 
-**v1.0.0 – v1.2.0 (baseline)**
+## v1.0.0 – v1.2.0 (baseline)
 
 - ✅ Generic business search
 - ✅ Multi-city support

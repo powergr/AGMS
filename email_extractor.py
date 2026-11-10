@@ -1,6 +1,6 @@
 """
 Email Extractor - Extract business emails from websites
-Version: 1.1.1
+Version: 1.1.2
 Author: Email Extractor Team
 License: MIT
 """
@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import sys
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 __author__ = "Pashalis Laoutaris"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -267,17 +267,16 @@ class EmailExtractor:
         
         if not website:
             logger.info(f"No website for {business_name}, skipping")
+            business['email'] = ''
+            business['all_emails'] = ''
             return business
         
         # Extract emails
         emails = self.extract_emails_from_website(website)
         
-        # Add first email to business data (or empty string)
+        # Always add both keys so every dict has the same structure
         business['email'] = emails[0] if emails else ''
-        
-        # Optionally store all found emails
-        if len(emails) > 1:
-            business['all_emails'] = ', '.join(emails)
+        business['all_emails'] = ', '.join(emails) if emails else ''
         
         return business
     
@@ -310,6 +309,9 @@ class EmailExtractor:
                     except Exception as e:
                         business = future_to_business[future]
                         logger.error(f"Error processing {business.get('name')}: {e}")
+                        # Ensure keys exist even on error
+                        business['email'] = business.get('email', '')
+                        business['all_emails'] = business.get('all_emails', '')
                         updated_businesses.append(business)
         else:
             # Sequential processing
@@ -400,10 +402,23 @@ class EmailExtractor:
         
         # Save results
         if updated_businesses:
-            fieldnames = list(updated_businesses[0].keys())
-            
+            # Collect the complete set of fieldnames from ALL businesses
+            # so we never hit "dict contains fields not in fieldnames"
+            fieldnames = []
+            seen = set()
+            for business in updated_businesses:
+                for key in business.keys():
+                    if key not in seen:
+                        seen.add(key)
+                        fieldnames.append(key)
+
+            # Guarantee these two columns always exist
+            for required in ('email', 'all_emails'):
+                if required not in seen:
+                    fieldnames.append(required)
+
             with open(output_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(updated_businesses)
             

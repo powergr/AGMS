@@ -32,7 +32,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # Version
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ class GoogleMapsScraper:
                 new_count = len(new_elements)
                 
                 if new_count > current_count:
-                    logger.info(f"✓ Loaded {new_count - current_count} more businesses (total: {new_count})")
+                    logger.info(f"[OK] Loaded {new_count - current_count} more businesses (total: {new_count})")
                     no_change_count = 0
                 else:
                     no_change_count += 1
@@ -228,7 +228,7 @@ class GoogleMapsScraper:
                     pass
             
             final_count = len(self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc'))
-            logger.info(f"✓ Finished scrolling: Total {final_count} businesses found")
+            logger.info(f"[OK] Finished scrolling: Total {final_count} businesses found")
             
         except Exception as e:
             logger.error(f"Error during scrolling: {e}")
@@ -260,7 +260,7 @@ class GoogleMapsScraper:
                     
                     if business_data and business_data.get('company'):
                         businesses.append(business_data)
-                        logger.info(f"✓ Extracted: {business_data['company']}")
+                        logger.info(f"[OK] Extracted: {business_data['company']}")
                         if business_data.get('website'):
                             logger.info(f"  Website: {business_data['website']}")
                         if business_data.get('email'):
@@ -315,10 +315,17 @@ class GoogleMapsScraper:
             
             if business_data['company']:
                 try:
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                    time.sleep(1)
-                    element.click()
-                    time.sleep(random.uniform(4, 6))
+                    # Scroll into view
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
+                    time.sleep(0.6)
+
+                    # Try normal click first, fall back to JS click
+                    try:
+                        element.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", element)
+
+                    time.sleep(random.uniform(3.5, 5.5))
                     self.extract_detailed_info(business_data)
                 except Exception as e:
                     logger.warning(f"Could not get detailed info for {business_data['company']}: {e}")
@@ -854,7 +861,7 @@ def execute_scraping_job(args, cities):
     all_results = []
     
     if args.workers > 1:
-        print(f"🚀 Starting MULTI-THREADED mode with {args.workers} concurrent browsers...")
+        print(f" Starting MULTI-THREADED mode with {args.workers} concurrent browsers...")
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             future_to_city = {executor.submit(scrape_single_city, city, args): city for city in cities}
             for future in as_completed(future_to_city):
@@ -863,7 +870,7 @@ def execute_scraping_job(args, cities):
                     res = future.result()
                     all_results.extend(res)
                 except Exception as exc:
-                    print(f"❌ City {city} generated an exception: {exc}")
+                    print(f"[ERROR] City {city} generated an exception: {exc}")
     else:
         scraper = GoogleMapsScraper(headless=args.headless, proxy=args.proxy)
         try:
@@ -895,9 +902,9 @@ def execute_scraping_job(args, cities):
         print(f"\n{'=' * 60}")
         print("Scraping Results")
         print(f"{'=' * 60}")
-        print(f"📊 Total companies found: {len(all_results)}")
-        print(f"🏙️  Cities processed: {len(set(r['city'] for r in all_results))}")
-        
+        print(f"Total companies found: {len(all_results)}")
+        print(f"Cities processed: {len(set(r['city'] for r in all_results))}")
+
         with_ratings = len([r for r in all_results if r['rating']])
         with_reviews = len([r for r in all_results if r['reviews']])
         with_websites = len([r for r in all_results if r['website']])
@@ -905,33 +912,33 @@ def execute_scraping_job(args, cities):
         with_phones = len([r for r in all_results if r['phone']])
         with_addresses = len([r for r in all_results if r['address']])
         with_hours = len([r for r in all_results if r.get('hours')])
-        
-        print(f"⭐ Companies with ratings: {with_ratings} ({with_ratings/len(all_results)*100:.1f}%)")
-        print(f"💬 Companies with reviews: {with_reviews} ({with_reviews/len(all_results)*100:.1f}%)")
-        print(f"🌐 Companies with websites: {with_websites} ({with_websites/len(all_results)*100:.1f}%)")
-        print(f"📧 Companies with emails: {with_emails} ({with_emails/len(all_results)*100:.1f}%)")
-        print(f"📞 Companies with phones: {with_phones} ({with_phones/len(all_results)*100:.1f}%)")
-        print(f"📍 Companies with addresses: {with_addresses} ({with_addresses/len(all_results)*100:.1f}%)")
-        print(f"🕒 Companies with hours: {with_hours} ({with_hours/len(all_results)*100:.1f}%)")
-        
-        print(f"\n🔍 Sample results:")
+
+        print(f"Companies with ratings: {with_ratings} ({with_ratings/len(all_results)*100:.1f}%)")
+        print(f"Companies with reviews: {with_reviews} ({with_reviews/len(all_results)*100:.1f}%)")
+        print(f"Companies with websites: {with_websites} ({with_websites/len(all_results)*100:.1f}%)")
+        print(f"Companies with emails: {with_emails} ({with_emails/len(all_results)*100:.1f}%)")
+        print(f"Companies with phones: {with_phones} ({with_phones/len(all_results)*100:.1f}%)")
+        print(f"Companies with addresses: {with_addresses} ({with_addresses/len(all_results)*100:.1f}%)")
+        print(f"Companies with hours: {with_hours} ({with_hours/len(all_results)*100:.1f}%)")
+
+        print(f"\nSample results:")
         for i, result in enumerate(all_results[:3], 1):
             print(f"\n{i}. {result['company']} ({result['city']})")
             if result['rating']:
-                print(f"   ⭐ {result['rating']} stars ({result['reviews']} reviews)")
+                print(f"   Rating: {result['rating']} stars ({result['reviews']} reviews)")
             if result['address']:
-                print(f"   📍 {result['address']}")
+                print(f"   Address: {result['address']}")
             if result['website']:
-                print(f"   🌐 {result['website']}")
+                print(f"   Website: {result['website']}")
             if result.get('email'):
-                print(f"   📧 {result['email']}")
+                print(f"   Email: {result['email']}")
             if result['phone']:
-                print(f"   📞 {result['phone']}")
-        
-        print(f"\n✅ Scraping completed successfully!")
+                print(f"   Phone: {result['phone']}")
+
+        print(f"\n[DONE] Scraping completed successfully!")
         
     else:
-        print("❌ No results found.")
+        print("[ERROR] No results found.")
 
 
 def main():
@@ -1000,10 +1007,10 @@ def main():
             execute_scraping_job(args, cities)
             
     except KeyboardInterrupt:
-        print("\n⚠️  Scraping interrupted by user")
+        print("\n[WARNING] Scraping interrupted by user")
     except Exception as e:
         logger.error(f"Error occurred: {e}")
-        print(f"❌ Error: {e}")
+        print(f"[ERROR] Error: {e}")
     finally:
         print("Done!")
 

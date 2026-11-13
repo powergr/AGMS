@@ -6,7 +6,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import schedule
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 # The whole UI sticks to exactly two accent colors: PRIMARY marks section
 # headers/progress so related options are easy to scan, ACCENT marks the one

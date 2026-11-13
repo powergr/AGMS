@@ -2,8 +2,8 @@
 
 A powerful, generic Python-based web scraper for extracting business information from Google Maps. Perfect for market research, lead generation, and competitive analysis.
 
-**18/03/2026 UPDATE:**
-The script has updated to work with all the latest changes from Google. Please open an issue if you find a problem.
+**13/11/2026 UPDATE:**
+The script has updated to work with all the latest changes from Google. Please open an issue if you find a problem. Small bug fixes.
 
 **Added an email extractor, because Google Maps does not have emails in companies.**
 

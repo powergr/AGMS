@@ -9,7 +9,7 @@ The script has updated to work with all the latest changes from Google. Please o
 
 ![Python Version](https://img.shields.io/badge/python-3.14%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.3.1-orange)
+![Version](https://img.shields.io/badge/version-1.3.2-orange)
 ![Status](https://img.shields.io/badge/status-active-success)
 
 ## ✨ Features
@@ -23,7 +23,7 @@ The script has updated to work with all the latest changes from Google. Please o
 - 🔍 **Smart Pagination**: Automatically loads all available results
 - 🎭 **Headless Mode**: Run with or without visible browser
 - ⚡ **CLI Interface**: Easy-to-use command-line interface with multiple options
-- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with the same capabilities as the CLI — see [docs/GUI_setup_guide.md](docs/GUI_setup_guide.md) and [docs/CLI-vs-GUI.md](docs/CLI-vs-GUI.md)
+- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with the same capabilities as the CLI. See [docs/GUI_setup_guide.md](docs/GUI_setup_guide.md) and [docs/CLI-vs-GUI.md](docs/CLI-vs-GUI.md)
 - 🧵 **Multi-Threaded**: Run several browsers in parallel to scrape faster
 - 🌐 **Proxy Support**: Route requests through a proxy server
 - ⏰ **Scheduling**: Re-run a job automatically on a daily, hourly, or weekly interval
@@ -98,7 +98,7 @@ python google_maps_scraper.py -q "italian restaurants" -f cities.txt
 ### Search with Custom Output
 
 ```bash
-python google_maps_scraper.py -q "hotels" -c "Paris, France" "London, UK" -o my_hotels.csv
+python google_maps_scraper.py -q "hotels" -c "Paris, France" "London, UK" -o my_hotels
 ```
 
 ## Usage
@@ -141,13 +141,13 @@ python google_maps_scraper.py -q "SEARCH_QUERY" [-c CITIES | -f CITIES_FILE] [OP
 
 ### Advanced Options
 
-| Option          | Description                                                                                                       | Default     |
-| --------------- | ----------------------------------------------------------------------------------------------------------------- | ----------- |
-| `--delay`       | Delay between cities (seconds)                                                                                    | `10`        |
-| `--max-results` | Maximum results per city _(accepted but not currently implemented — see [Known Limitations](#known-limitations))_ | All results |
-| `--verbose`     | Show detailed logs                                                                                                | `False`     |
-| `--sqlite`      | Also save results to a SQLite DB file, e.g. `data.db`                                                             | None        |
-| `--postgres`    | Also save results to PostgreSQL via a connection string, e.g. `postgresql://user:pass@localhost/dbname`           | None        |
+| Option          | Description                                                                                             | Default     |
+| --------------- | ------------------------------------------------------------------------------------------------------- | ----------- |
+| `--delay`       | Delay between cities (seconds)                                                                          | `10`        |
+| `--max-results` | Most businesses to collect per city. Scrolling stops as soon as enough listings are loaded              | All results |
+| `--verbose`     | Show detailed logs                                                                                      | `False`     |
+| `--sqlite`      | Also save results to a SQLite DB file, e.g. `data.db`                                                   | None        |
+| `--postgres`    | Also save results to PostgreSQL via a connection string, e.g. `postgresql://user:pass@localhost/dbname` | None        |
 
 ### Help & Version
 
@@ -325,17 +325,13 @@ python google_maps_scraper.py -q "restaurants" -c "Paris, France" --verbose
 
 ## Known Limitations
 
-- **`--max-results` is not implemented yet.** The flag is accepted (and shown in `--help`), but the
-  scraper does not currently cap how many results it extracts per city — every business found is
-  still scraped. Track/vote on this if you need it enforced.
 - **Non-interactive runs need `--test` or `--schedule`.** Without one of those two flags, the CLI
-  pauses for a `y/n` confirmation before scraping. If you're wiring this into Task Scheduler, cron,
-  or another unattended pipeline, add `--test` (for a dry run) or `--schedule` — a bare
-  `python google_maps_scraper.py -q ... -f cities.txt --headless` will hang (or crash with
-  `EOFError`) waiting for input that never arrives.
-- **`--sqlite`/`--postgres` always append.** There's no deduplication, so repeated runs (especially
-  with `--schedule`) will insert the same businesses again on every run rather than updating existing
-  rows.
+  pauses for a `y/n` confirmation before scraping. For Task Scheduler, cron, or another unattended
+  pipeline, add `--test` for a dry run or `--schedule`. A bare
+  `python google_maps_scraper.py -q ... -f cities.txt --headless` will hang, or crash with
+  `EOFError`, while it waits for input that never arrives.
+- **`--sqlite` and `--postgres` always append.** There is no deduplication. Repeated runs, especially
+  with `--schedule`, insert the same businesses again on every run instead of updating existing rows.
 
 ## Performance Tips
 
@@ -378,7 +374,7 @@ python google_maps_scraper.py -q "restaurants" -c "Paris, France" --verbose
 The scraper includes built-in delays:
 
 - Random delays between actions (1-6 seconds)
-- Configurable delay between cities (default: 10 seconds)
+- Configurable delay between cities (default: 10 seconds, varied by 20% either way)
 - Random scroll timing to appear more human-like
 
 ### Data Quality
@@ -391,10 +387,31 @@ The scraper includes built-in delays:
 
 ### Version History
 
-**v1.3.1** (Current)
+## v1.3.2 (Current)
+
+- ✅ Fixed the Python icon showing in the taskbar. The icon now loads from the app folder, so it works from any launch location, and the app sets its own Windows taskbar identity
+- ✅ `--delay` now works in the CLI. It was accepted but ignored, and a fixed 8 to 12 second wait was used instead. The wait is now the delay you set, varied by 20% either way
+- ✅ With `--workers`, each worker now waits the delay between its own cities, instead of idling for 8 to 12 seconds after every city
+- ✅ Stop in the GUI now takes effect within moments, even in the middle of a large city, and the businesses found so far are saved
+- ✅ Closing the GUI window during a scrape now asks first, then shuts down every browser it started so no Chrome processes are left running
+- ✅ GUI error popups now appear. A blank number box, such as Limit Cities or Parallel Workers, is caught when you press Start, with a clear message
+- ✅ Scheduled runs in the CLI and the GUI now survive a failed cycle and try again on the next one. Scheduled GUI runs no longer open a dialog after every cycle
+- ✅ Exports no longer start a second browser. If one export fails, for example a CSV that is open in Excel, the other formats are still saved and the failure is reported
+- ✅ Website detection now ignores the results list and social, booking, delivery and review links, so a wrong site's email is no longer attached. It also accepts sites on any domain ending, such as `.gr`
+- ✅ Email choice is now stable. Junk addresses are skipped, and an address on the business's own domain wins
+- ✅ Maps is now requested in English, so ratings, hours and photos are found on systems set to another language
+- ✅ Fixed the `-o` examples, which added `.csv` twice
+- ✅ `--max-results` and the GUI "Max Results Per City" box now work. They were accepted but ignored before. Scrolling stops as soon as enough listings are loaded, which also saves time
+- ✅ The CLI no longer crashes on characters the console cannot show, such as a Greek business name on older Python versions. The scheduler messages are now plain text
+- ✅ Saved GUI settings no longer contain passwords. Proxy and database passwords are dropped when you save, and you are told to enter them again after loading
+- ✅ Save Logs and Save Settings now work with emoji and non-English text on every Python version
+- ✅ The GUI maximizes on launch on Linux too, instead of failing at startup
+- ✅ The proxy password is no longer written to the log, and unused code was removed
+
+## v1.3.1
 
 - ✅ GUI now has full feature parity with the CLI: proxy support, multi-threaded workers, Excel/SQLite/PostgreSQL export, and scheduling (daily/hourly/weekly)
-- ✅ Fixed the GUI's CSV/JSON export, which was missing the `hours`/`city` fields and always leaving `image` blank — it now shares the CLI's own exporter code, so both versions produce identical output
+- ✅ Fixed the GUI's CSV/JSON export, which was missing the `hours` and `city` fields and always leaving `image` blank. It now shares the CLI's own exporter code, so both versions produce identical output
 - ✅ The GUI's "Verbose Logging" checkbox now actually works, and the detailed per-business logs from the scraping engine show up in the GUI's log panel
 - ✅ Fixed a threading bug where the GUI updated its progress bar and logs directly from a background thread, which is unsafe and could misbehave once multiple workers were involved
 
@@ -492,7 +509,7 @@ If you find this project useful, please consider giving it a star on GitHub! It 
 
 ### Shipped in v1.3.0 – v1.3.1
 
-_(originally CLI-only in v1.3.0; the GUI reached the same feature set in v1.3.1 — see [Version History](#version-history))_
+_(originally CLI-only in v1.3.0; the GUI reached the same feature set in v1.3.1. See [Version History](#version-history).)_
 
 - ✅ Support for more data fields (hours, photos, etc.)
 - ✅ Proxy support for large-scale scraping
@@ -614,7 +631,8 @@ python google_maps_scraper.py --version
 
    _Note: This runs the job immediately once, then keeps the script running in the foreground and
    re-runs it at the start of each following interval (`daily` = every midnight, `hourly` = every
-   hour, `weekly` = every week) — press Ctrl+C to stop it._
+   hour, `weekly` = every week). Press Ctrl+C to stop it. A run that fails is logged, and the next
+   cycle tries again._
 
 6. **Email Extraction:**
    This works entirely in the background automatically. The script reads the `website` URL generated by Google Maps, uses `requests` and `BeautifulSoup` to scan the homepage html, checks for `<a href="mailto:...">` attributes, and falls back to a RegEx pattern to find unlinked emails on the landing page. It populates the new `email` field in exports.
@@ -623,7 +641,7 @@ python google_maps_scraper.py --version
 
 ## Made with ❤️ by Pashalis Laoutaris
 
-**Last Updated**: September 2026
+**Last Updated**: November 2026
 
 **Repository**: [github.com/powergr/AGMS](https://github.com/powergr/AGMS)
 

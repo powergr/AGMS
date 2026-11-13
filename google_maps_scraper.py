@@ -8,6 +8,7 @@ import random
 import urllib.parse
 import logging
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- NEW DEPENDENCIES ---
@@ -28,7 +29,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # Version
@@ -37,11 +38,73 @@ __version__ = "1.3.2"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+ASSET_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js', '.ico', '.woff', '.woff2', '.ttf')
+JUNK_EMAIL_DOMAINS = ('sentry.io', 'wixpress.com', 'example.com', 'domain.com', 'yourdomain.com', 'email.com', 'test.com')
+PREFERRED_EMAIL_NAMES = ('info', 'contact', 'hello', 'office', 'sales', 'enquiries', 'inquiries', 'support', 'admin', 'mail')
+
+# Social, booking, delivery and review sites that a Maps page links to; none is the business's own website
+EXCLUDED_SITE_BRANDS = (
+    'facebook', 'instagram', 'twitter', 'x', 'linkedin', 'youtube', 'tiktok', 'pinterest', 'whatsapp',
+    'tripadvisor', 'yelp', 'foursquare', 'opentable', 'resy', 'booking', 'expedia',
+    'ubereats', 'doordash', 'grubhub', 'deliveroo', 'wolt', 'wikipedia',
+)
+PUBLIC_SUFFIX_LABELS = ('co', 'com', 'org', 'net', 'gov', 'ac')
+
+
+def pick_best_email(candidates, website=None):
+    """Choose one contact email from scraped candidates: drop junk, then prefer an address on the
+    business's own domain, then common contact names. The same input always gives the same answer."""
+    cleaned = set()
+    for raw in candidates:
+        email = urllib.parse.unquote(raw).strip().strip('.,;:<>()[]"\'').lower()
+        if not EMAIL_PATTERN.fullmatch(email) or email.endswith(ASSET_SUFFIXES):
+            continue
+        domain = email.rsplit('@', 1)[1]
+        if any(domain == junk or domain.endswith('.' + junk) for junk in JUNK_EMAIL_DOMAINS):
+            continue
+        cleaned.add(email)
+    if not cleaned:
+        return ''
+
+    site_host = urllib.parse.urlparse(website).netloc.lower().split(':')[0] if website else ''
+    if site_host.startswith('www.'):
+        site_host = site_host[4:]
+
+    def rank(email):
+        name, domain = email.split('@')
+        on_own_site = bool(site_host) and (
+            domain == site_host or domain.endswith('.' + site_host) or site_host.endswith('.' + domain))
+        name_rank = PREFERRED_EMAIL_NAMES.index(name) if name in PREFERRED_EMAIL_NAMES else len(PREFERRED_EMAIL_NAMES)
+        return (not on_own_site, name_rank, email)
+
+    return min(cleaned, key=rank)
+
 class GoogleMapsScraper:
-    def __init__(self, headless=True, proxy=None):
+    def __init__(self, headless=True, proxy=None, stop_event=None):
         self.proxy = proxy
+        self.stop_event = stop_event if stop_event is not None else threading.Event()
         self.setup_driver(headless)
         self.results = []
+
+    @classmethod
+    def for_export(cls, results):
+        """An instance that only holds results for the save_to_* methods. Skips __init__, so no browser starts."""
+        exporter = cls.__new__(cls)
+        exporter.results = results
+        return exporter
+
+    @staticmethod
+    def jittered_delay(delay):
+        """The configured delay, varied by 20% either way so requests are not perfectly regular"""
+        return random.uniform(delay * 0.8, delay * 1.2)
+
+    def should_stop(self):
+        return self.stop_event.is_set()
+
+    def pause(self, seconds):
+        """Sleep that wakes immediately when a stop is requested"""
+        self.stop_event.wait(seconds)
         
     def setup_driver(self, headless=True):
         chrome_options = Options()
@@ -59,10 +122,14 @@ class GoogleMapsScraper:
         # --- NEW: Proxy Support ---
         if self.proxy:
             chrome_options.add_argument(f'--proxy-server={self.proxy}')
-            logger.info(f"Using proxy: {self.proxy}")
+            logger.info(f"Using proxy: {self.proxy.rpartition('@')[2]}")  # never log a user:password part
         
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         chrome_options.add_argument(f"--user-agent={user_agent}")
+
+        # Keep Maps in English: the rating, hours and photo selectors below match English labels
+        chrome_options.add_argument("--lang=en-US")
+        chrome_options.add_experimental_option("prefs", {"intl.accept_languages": "en-US,en"})
         
         try:
             service = Service(ChromeDriverManager().install())
@@ -77,7 +144,7 @@ class GoogleMapsScraper:
     def handle_cookie_consent(self):
         """Automatically handle Google's cookie consent popup"""
         try:
-            time.sleep(2)
+            self.pause(2)
             
             consent_buttons = [
                 'button[aria-label*="Reject all"]',
@@ -97,7 +164,7 @@ class GoogleMapsScraper:
                             if 'reject' in button_text or 'accept' in button_text:
                                 self.driver.execute_script("arguments[0].click();", button)
                                 logger.info(f"Clicked cookie consent button: {button.text}")
-                                time.sleep(2)
+                                self.pause(2)
                                 return
                 except:
                     continue
@@ -116,7 +183,7 @@ class GoogleMapsScraper:
                         if button.is_displayed():
                             self.driver.execute_script("arguments[0].click();", button)
                             logger.info("Clicked cookie consent button via XPath")
-                            time.sleep(2)
+                            self.pause(2)
                             return
                     except:
                         continue
@@ -128,7 +195,8 @@ class GoogleMapsScraper:
         except Exception as e:
             logger.debug(f"Error handling cookie consent: {e}")
     
-    def search_google_maps(self, query, city):
+    def search_google_maps(self, query, city, max_results=None):
+        max_results = max_results if max_results and max_results > 0 else None
         search_term = f"{query} {city}"
         logger.info(f"Searching for: {search_term}")
         
@@ -136,10 +204,12 @@ class GoogleMapsScraper:
             # --- FIX: Use Direct URL Search instead of typing ---
             # This is much more reliable and skips the search box entirely
             encoded_query = urllib.parse.quote_plus(search_term)
-            search_url = f"https://www.google.com/maps/search/{encoded_query}"
+            search_url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
             
             self.driver.get(search_url)
-            time.sleep(random.uniform(4, 6))
+            self.pause(random.uniform(4, 6))
+            if self.should_stop():
+                return []
             
             # Handle any cookie popups that appear
             self.handle_cookie_consent()
@@ -155,24 +225,29 @@ class GoogleMapsScraper:
                 logger.warning("Results panel not found (might be no results for this query)")
                 return []
             
-            self.load_all_results()
-            businesses = self.extract_all_businesses()
+            self.load_all_results(max_results)
+            if self.should_stop():
+                return []
+            businesses = self.extract_all_businesses(max_results)
             return businesses
             
         except Exception as e:
             logger.error(f"Error searching for {search_term}: {e}")
             return []
     
-    def load_all_results(self):
+    def load_all_results(self, max_results=None):
         try:
-            time.sleep(3)
+            self.pause(3)
             scroll_attempts = 0
             max_scrolls = 25
             no_change_count = 0
             
-            while scroll_attempts < max_scrolls:
+            while scroll_attempts < max_scrolls and not self.should_stop():
                 current_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
                 current_count = len(current_elements)
+                if max_results and current_count >= max_results:
+                    logger.info(f"Loaded {current_count} businesses, enough for the limit of {max_results}")
+                    break
                 
                 logger.info(f"Scroll {scroll_attempts + 1}: Currently {current_count} businesses visible")
                 
@@ -199,7 +274,7 @@ class GoogleMapsScraper:
                     pass
                 
                 # Wait for Google to fetch the new data from their server
-                time.sleep(random.uniform(4, 6))
+                self.pause(random.uniform(4, 6))
                 
                 new_elements = self.driver.find_elements(By.CSS_SELECTOR, '.hfpxzc')
                 new_count = len(new_elements)
@@ -235,7 +310,7 @@ class GoogleMapsScraper:
             import traceback
             traceback.print_exc()
     
-    def extract_all_businesses(self):
+    def extract_all_businesses(self, max_results=None):
         businesses = []
         
         try:
@@ -245,6 +320,11 @@ class GoogleMapsScraper:
             
             # Loop using index, re-fetching elements every time to prevent StaleElementReference
             for i in range(total_elements):
+                if self.should_stop():
+                    logger.info(f"Stop requested: keeping the {len(businesses)} businesses extracted so far")
+                    break
+                if max_results and len(businesses) >= max_results:
+                    break
                 try:
                     logger.info(f"Processing business {i+1}/{total_elements}")
                     
@@ -266,7 +346,7 @@ class GoogleMapsScraper:
                         if business_data.get('email'):
                             logger.info(f"  Email: {business_data['email']}")
                     
-                    time.sleep(random.uniform(1.5, 2.5))
+                    self.pause(random.uniform(1.5, 2.5))
                     
                 except Exception as e:
                     logger.warning(f"Error processing business {i+1}: {e}")
@@ -317,7 +397,7 @@ class GoogleMapsScraper:
                 try:
                     # Scroll into view
                     self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
-                    time.sleep(0.6)
+                    self.pause(0.6)
 
                     # Try normal click first, fall back to JS click
                     try:
@@ -325,7 +405,9 @@ class GoogleMapsScraper:
                     except Exception:
                         self.driver.execute_script("arguments[0].click();", element)
 
-                    time.sleep(random.uniform(3.5, 5.5))
+                    self.pause(random.uniform(3.5, 5.5))
+                    if self.should_stop():
+                        return None  # the panel may not have loaded yet, so this business would hold stale data
                     self.extract_detailed_info(business_data)
                 except Exception as e:
                     logger.warning(f"Could not get detailed info for {business_data['company']}: {e}")
@@ -338,7 +420,7 @@ class GoogleMapsScraper:
     
     def extract_detailed_info(self, business_data):
         try:
-            time.sleep(3)
+            self.pause(3)
             self.extract_address(business_data)
             self.extract_phone(business_data)
             self.extract_website_comprehensive(business_data)
@@ -462,7 +544,7 @@ class GoogleMapsScraper:
                 try:
                     original_windows = self.driver.window_handles
                     website_element.click()
-                    time.sleep(3)
+                    self.pause(3)
                     
                     new_windows = self.driver.window_handles
                     if len(new_windows) > len(original_windows):
@@ -489,17 +571,23 @@ class GoogleMapsScraper:
                 continue
         
         try:
-            all_links = self.driver.find_elements(By.TAG_NAME, 'a')
-            for link in all_links:
-                href = link.get_attribute('href')
-                if href and not self.is_google_url(href):
-                    if any(domain in href.lower() for domain in ['.com', '.fr', '.co.uk', '.org', '.net', '.de', '.it', '.es']):
-                        clean_url = self.clean_website_url(href)
-                        if clean_url:
-                            business_data['website'] = clean_url
-                            logger.info(f"Found website via link scan: {clean_url}")
-                            self.extract_email_from_website(business_data) # <--- NEW EMAIL EXTRACTION
-                            return
+            # Skip the results list on the left: its links belong to other businesses
+            hrefs = self.driver.execute_script("""
+                return Array.from(document.querySelectorAll('a[href]'))
+                    .filter(a => !a.closest('div[role="feed"]'))
+                    .map(a => a.href);
+            """)
+            for href in hrefs:
+                if not href.startswith(('http://', 'https://')):
+                    continue
+                if self.is_google_url(href) or self.is_excluded_site(href):
+                    continue
+                clean_url = self.clean_website_url(href)
+                if clean_url:
+                    business_data['website'] = clean_url
+                    logger.info(f"Found website via link scan: {clean_url}")
+                    self.extract_email_from_website(business_data) # <--- NEW EMAIL EXTRACTION
+                    return
         except:
             pass
 
@@ -507,36 +595,42 @@ class GoogleMapsScraper:
     def extract_email_from_website(self, business_data):
         url = business_data.get('website')
         if not url: return
-        
+
         try:
             logger.info(f"Scanning {url} for emails...")
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             response = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             # Method 1: Mailto links (most accurate)
+            mailto_candidates = []
             for a_tag in soup.find_all('a', href=True):
-                if a_tag['href'].startswith('mailto:'):
-                    email = a_tag['href'].replace('mailto:', '').split('?')[0].strip()
-                    if email and '@' in email:
-                        business_data['email'] = email
-                        logger.info(f"Found email via mailto: {email}")
-                        return
-            
+                if a_tag['href'].lower().startswith('mailto:'):
+                    mailto_candidates.extend(a_tag['href'][7:].split('?')[0].split(','))
+            email = pick_best_email(mailto_candidates, url)
+            if email:
+                business_data['email'] = email
+                logger.info(f"Found email via mailto: {email}")
+                return
+
             # Method 2: Regex scanning the text
-            emails = set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', response.text))
-            
-            # Filter out false positives (images, generic strings)
-            valid_emails = [e for e in emails if not e.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'))]
-            
-            if valid_emails:
-                business_data['email'] = valid_emails[0]
-                logger.info(f"Found email via Regex: {valid_emails[0]}")
-                
+            email = pick_best_email(EMAIL_PATTERN.findall(response.text), url)
+            if email:
+                business_data['email'] = email
+                logger.info(f"Found email via Regex: {email}")
+
         except requests.RequestException as e:
             logger.debug(f"Failed to connect to website for email extraction: {e}")
         except Exception as e:
             logger.debug(f"Error during email extraction: {e}")
+
+    def is_excluded_site(self, url):
+        """True for social, booking, delivery and review sites, which are never the business's own website"""
+        labels = urllib.parse.urlparse(url).netloc.lower().split(':')[0].split('.')
+        brand = labels[-2:-1]
+        if len(labels) >= 3 and labels[-2] in PUBLIC_SUFFIX_LABELS:
+            brand = labels[-3:-2]
+        return any(label in EXCLUDED_SITE_BRANDS for label in brand)
 
     def clean_website_url(self, url):
         if not url:
@@ -654,29 +748,32 @@ class GoogleMapsScraper:
         except Exception as e:
             logger.warning(f"Error extracting rating/reviews: {e}")
     
-    def scrape_cities(self, cities, query):
+    def scrape_cities(self, cities, query, delay=10, max_results=None):
         all_results = []
-        
+
         for i, city in enumerate(cities, 1):
+            if self.should_stop():
+                break
             city = city.strip()
             if not city:
                 continue
-                
+
             logger.info(f"Processing city {i}/{len(cities)}: {city}")
-            
+
             try:
-                businesses = self.search_google_maps(query, city)
+                businesses = self.search_google_maps(query, city, max_results)
                 for business in businesses:
                     business['city'] = city
                     all_results.append(business)
-                
+
                 logger.info(f"Found {len(businesses)} businesses in {city}")
-                time.sleep(random.uniform(8, 12))
-                
+                if i < len(cities):
+                    self.pause(self.jittered_delay(delay))
+
             except Exception as e:
                 logger.error(f"Error processing city {city}: {e}")
                 continue
-        
+
         self.results = all_results
         return all_results
 
@@ -770,6 +867,32 @@ class GoogleMapsScraper:
         except Exception as e:
             logger.error(f"PostgreSQL Export Error: {e}")
     
+    def export_all(self, output, formats, sqlite_db=None, postgres_conn=None):
+        """Run every requested export. One failing export (a CSV open in Excel, a bad database
+        URL) is logged and does not stop the others, so scraped results are not lost.
+        Returns the names of the exports that failed."""
+        formats = set(formats)
+        steps = []
+        if formats & {'csv', 'both'}:
+            steps.append(("CSV", lambda: self.save_to_csv(f"{output}.csv")))
+        if formats & {'json', 'both'}:
+            steps.append(("JSON", lambda: self.save_to_json(f"{output}.json")))
+        if 'excel' in formats:
+            steps.append(("Excel", lambda: self.save_to_excel(f"{output}.xlsx")))
+        if sqlite_db:
+            steps.append(("SQLite", lambda: self.save_to_sqlite(sqlite_db)))
+        if postgres_conn:
+            steps.append(("PostgreSQL", lambda: self.save_to_postgres(postgres_conn)))
+
+        failed = []
+        for name, step in steps:
+            try:
+                step()
+            except Exception as e:
+                logger.error(f"{name} export failed: {e}")
+                failed.append(name)
+        return failed
+
     def close(self):
         """Close the browser"""
         if hasattr(self, 'driver'):
@@ -810,7 +933,7 @@ def parse_arguments():
 Examples:
   python %(prog)s --query "sustainability companies" --cities-file FASHION_CAPITALS.md
   python %(prog)s --query "italian restaurants" --cities "New York, USA" "Paris, France"
-  python %(prog)s -q "coffee shops" -c "London, UK" "Tokyo, Japan" -o coffee_shops.csv
+  python %(prog)s -q "coffee shops" -c "London, UK" "Tokyo, Japan" -o coffee_shops
   python %(prog)s -q "hotels" --cities-file cities.txt --headless --limit 5
   python %(prog)s -q "gyms" -c "Berlin, Germany" --test
         '''
@@ -828,8 +951,8 @@ Examples:
     parser.add_argument('--headless', action='store_true', help='Run browser in headless mode')
     parser.add_argument('--limit', type=int, help='Limit number of cities to process')
     parser.add_argument('--test', action='store_true', help='Test mode: scrape only first city')
-    parser.add_argument('--delay', type=int, default=10, help='Delay between cities in seconds')
-    parser.add_argument('--max-results', type=int, help='Maximum results per city')
+    parser.add_argument('--delay', type=int, default=10, help='Delay between cities in seconds (varied by 20%% either way)')
+    parser.add_argument('--max-results', type=int, help='Maximum businesses to collect per city (default: all)')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
     
     # --- NEW ARGUMENTS ---
@@ -843,11 +966,14 @@ Examples:
 
 
 # --- Worker for Multi-threading ---
-def scrape_single_city(city, args):
+def scrape_single_city(city, args, pre_delay=0):
+    # pre_delay is set for every city a worker picks up after its first: a cool-down between one worker's cities
+    if pre_delay:
+        time.sleep(GoogleMapsScraper.jittered_delay(pre_delay))
     scraper = GoogleMapsScraper(headless=args.headless, proxy=args.proxy)
     results = []
     try:
-        results = scraper.scrape_cities([city], args.query)
+        results = scraper.scrape_cities([city], args.query, delay=args.delay, max_results=args.max_results)
     except Exception as e:
         logger.error(f"Error in worker thread for {city}: {e}")
     finally:
@@ -863,7 +989,10 @@ def execute_scraping_job(args, cities):
     if args.workers > 1:
         print(f" Starting MULTI-THREADED mode with {args.workers} concurrent browsers...")
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            future_to_city = {executor.submit(scrape_single_city, city, args): city for city in cities}
+            future_to_city = {
+                executor.submit(scrape_single_city, city, args, args.delay if i >= args.workers else 0): city
+                for i, city in enumerate(cities)
+            }
             for future in as_completed(future_to_city):
                 city = future_to_city[future]
                 try:
@@ -875,30 +1004,19 @@ def execute_scraping_job(args, cities):
         scraper = GoogleMapsScraper(headless=args.headless, proxy=args.proxy)
         try:
             print("Starting single-threaded scraping process...\n")
-            all_results = scraper.scrape_cities(cities, args.query)
+            all_results = scraper.scrape_cities(cities, args.query, delay=args.delay, max_results=args.max_results)
         finally:
             print("\nClosing browser...")
             scraper.close()
     
     if all_results:
-        # We instantiate an empty scraper just to use its export methods cleanly
-        exporter = GoogleMapsScraper(headless=True)
-        exporter.close() # Close immediately, we just need the class methods
-        exporter.results = all_results
-        
+        exporter = GoogleMapsScraper.for_export(all_results)
+
         print("\nSaving results...")
-        if 'csv' in args.format or 'both' in args.format:
-            exporter.save_to_csv(f"{args.output}.csv")
-        if 'json' in args.format or 'both' in args.format:
-            exporter.save_to_json(f"{args.output}.json")
-        if 'excel' in args.format:
-            exporter.save_to_excel(f"{args.output}.xlsx")
-            
-        if args.sqlite:
-            exporter.save_to_sqlite(args.sqlite)
-        if args.postgres:
-            exporter.save_to_postgres(args.postgres)
-        
+        failed = exporter.export_all(args.output, args.format, args.sqlite, args.postgres)
+        if failed:
+            print(f"[WARNING] These exports failed, see the log above: {', '.join(failed)}")
+
         print(f"\n{'=' * 60}")
         print("Scraping Results")
         print(f"{'=' * 60}")
@@ -941,7 +1059,26 @@ def execute_scraping_job(args, cities):
         print("[ERROR] No results found.")
 
 
+def run_job_safely(args, cities):
+    """Scheduled runs must survive a failed cycle, so log the error and wait for the next one"""
+    try:
+        execute_scraping_job(args, cities)
+    except Exception as e:
+        logger.error(f"Scheduled run failed, will retry on the next cycle: {e}")
+
+
+def make_console_safe():
+    """Never crash on a character the console encoding cannot show, such as a Greek business
+    name on a cp1252 console: print a replacement character instead"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors='replace')
+        except (AttributeError, ValueError):
+            pass  # no console (pythonw) or an exotic stream
+
+
 def main():
+    make_console_safe()
     args = parse_arguments()
     
     if args.verbose:
@@ -973,6 +1110,7 @@ def main():
     print(f"Output formats: {', '.join(args.format)}")
     print(f"Headless mode: {args.headless}")
     print(f"Workers (Threads): {args.workers}")
+    if args.max_results: print(f"Max results per city: {args.max_results}")
     if args.proxy: print(f"Proxy: {args.proxy}")
     if args.schedule: print(f"Schedule: {args.schedule}")
     if args.sqlite: print(f"SQLite DB: {args.sqlite}")
@@ -988,18 +1126,18 @@ def main():
     
     try:
         if args.schedule:
-            print(f"\n📅 Scheduler Initialized. Job will run: {args.schedule}")
+            print(f"\n[SCHEDULE] Scheduler initialized. Job will run: {args.schedule}")
             if args.schedule == 'daily':
-                schedule.every().day.at("00:00").do(execute_scraping_job, args, cities)
+                schedule.every().day.at("00:00").do(run_job_safely, args, cities)
             elif args.schedule == 'hourly':
-                schedule.every().hour.do(execute_scraping_job, args, cities)
+                schedule.every().hour.do(run_job_safely, args, cities)
             elif args.schedule == 'weekly':
-                schedule.every().week.do(execute_scraping_job, args, cities)
+                schedule.every().week.do(run_job_safely, args, cities)
             
             # Run immediately once, then schedule
-            execute_scraping_job(args, cities)
+            run_job_safely(args, cities)
             
-            print("\n⏳ Waiting for next scheduled run... (Press Ctrl+C to exit)")
+            print("\n[SCHEDULE] Waiting for next scheduled run... (Press Ctrl+C to exit)")
             while True:
                 schedule.run_pending()
                 time.sleep(60)

@@ -1,8 +1,14 @@
+import ctypes
+import os
+import re
+import sys
+import urllib.parse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
 import time
 import logging
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import schedule
 
@@ -13,6 +19,51 @@ __version__ = "1.3.2"
 # primary action (Start).
 COLOR_PRIMARY = "#2F6FA5"
 COLOR_ACCENT = "#D9720C"
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def set_windows_app_id():
+    """Give the process its own taskbar identity, so Windows shows our icon instead of python.exe's"""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("powergr.agms.gui")
+        except (AttributeError, OSError):
+            pass
+
+
+def strip_secrets(value):
+    """Drop passwords from a proxy URL or database connection string, so they are never written to disk"""
+    if '://' in value:
+        parts = urllib.parse.urlsplit(value)
+        netloc = parts.netloc
+        if '@' in netloc:
+            userinfo, _, host = netloc.rpartition('@')
+            netloc = userinfo.split(':', 1)[0] + '@' + host
+        query = urllib.parse.urlencode(
+            [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k.lower() != 'password'])
+        return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    return re.sub(r"(?i)\bpassword\s*=\s*('[^']*'|\S*)\s*", "", value).strip()
+
+
+@dataclass(frozen=True)
+class ScrapeSettings:
+    """Every option, read once on the main thread when Start is pressed"""
+    query: str
+    cities: tuple
+    output: str
+    formats: tuple
+    sqlite_db: str
+    postgres_conn: str
+    headless: bool
+    verbose: bool
+    test_mode: bool
+    limit: int
+    max_results: int
+    delay: int
+    workers: int
+    proxy: str
+    schedule_mode: str
 
 class LogHandler(logging.Handler):
     """Custom logging handler for GUI"""
@@ -57,16 +108,36 @@ class GoogleMapsScraperGUI:
     def __init__(self, root):
         self.root = root
         self.root.title(f"Another Google Maps Scraper (AGMS) v{__version__}")
+        self._set_window_icon()
         self.root.geometry("1200x800")
-        self.root.state('zoomed')  # Maximized
+        self._maximize_window()
 
-        self.scraper = None
         self.scraping = False
-        self.cities_list = []
         self.logger = None
         self.gui_handler = None
+        self.stop_event = threading.Event()
+        self.worker_thread = None
+        self._active_scrapers = set()
+        self._scrapers_lock = threading.Lock()
 
         self.create_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _set_window_icon(self):
+        try:
+            self.root.iconbitmap(os.path.join(APP_DIR, "icon.ico"))
+        except tk.TclError as e:
+            print(f"Could not load icon: {e}")
+
+    def _maximize_window(self):
+        """Maximize on launch. 'zoomed' is a Windows and macOS state, so X11 gets the -zoomed attribute."""
+        try:
+            self.root.state('zoomed')
+        except tk.TclError:
+            try:
+                self.root.attributes('-zoomed', True)
+            except tk.TclError:
+                pass  # this window manager can't maximize: keep the 1200x800 default
 
     def setup_logging(self):
         """Setup logging for GUI - called AFTER log_text exists"""
@@ -208,7 +279,7 @@ class GoogleMapsScraperGUI:
         self._build_scraping_section(scraping_body)
 
     def _build_search_section(self, frame):
-        """Search query and cities input — always visible, no tab switch needed"""
+        """Search query and cities input, always visible with no tab switch needed"""
         frame.columnconfigure(1, weight=1)
 
         ttk.Label(frame, text="Search Query:").grid(row=0, column=0, sticky=tk.W, pady=5)
@@ -373,7 +444,10 @@ class GoogleMapsScraperGUI:
         filename = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
         if filename:
             try:
-                with open(filename, 'w') as f:
+                proxy = self.proxy_var.get().strip()
+                postgres = self.postgres_var.get().strip()
+                safe_proxy, safe_postgres = strip_secrets(proxy), strip_secrets(postgres)
+                with open(filename, 'w', encoding='utf-8') as f:
                     f.write(f"query={self.query_var.get()}\n")
                     f.write(f"output={self.output_var.get()}\n")
                     f.write(f"export_csv={self.export_csv_var.get()}\n")
@@ -386,12 +460,15 @@ class GoogleMapsScraperGUI:
                     f.write(f"delay={self.delay_var.get()}\n")
                     f.write(f"max_results={self.max_results_var.get()}\n")
                     f.write(f"workers={self.workers_var.get()}\n")
-                    f.write(f"proxy={self.proxy_var.get()}\n")
+                    f.write(f"proxy={safe_proxy}\n")
                     f.write(f"schedule={self.schedule_var.get()}\n")
                     f.write(f"sqlite={self.sqlite_var.get()}\n")
-                    f.write(f"postgres={self.postgres_var.get()}\n")
+                    f.write(f"postgres={safe_postgres}\n")
                 self.logger.info(f"Settings saved to {filename}")
-                messagebox.showinfo("Success", "Settings saved successfully!")
+                note = ""
+                if (safe_proxy, safe_postgres) != (proxy, postgres):
+                    note = "\n\nPasswords are never saved. Enter the proxy and database passwords again after loading."
+                messagebox.showinfo("Success", "Settings saved successfully!" + note)
             except Exception as e:
                 self.logger.error(f"Error saving settings: {e}")
                 messagebox.showerror("Error", f"Error saving settings: {e}")
@@ -401,7 +478,7 @@ class GoogleMapsScraperGUI:
         filename = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
         if filename:
             try:
-                with open(filename, 'r') as f:
+                with open(filename, 'r', encoding='utf-8', errors='replace') as f:
                     for line in f:
                         line = line.strip()
                         # split(..., 1): values like a Postgres URL contain '=' themselves
@@ -472,7 +549,7 @@ class GoogleMapsScraperGUI:
         if filename:
             try:
                 logs = self.log_text.get(1.0, tk.END)
-                with open(filename, 'w') as f:
+                with open(filename, 'w', encoding='utf-8') as f:
                     f.write(logs)
                 self.logger.info(f"Logs saved to {filename}")
                 messagebox.showinfo("Success", "Logs saved successfully!")
@@ -481,21 +558,18 @@ class GoogleMapsScraperGUI:
                 messagebox.showerror("Error", f"Error saving logs: {e}")
 
     def get_cities_list(self):
-        """Get cities from input"""
+        """Get cities from input. Raises ValueError with a user-facing message if the cities file can't be used."""
         if self.cities_mode_var.get() == "list":
             cities_text = self.cities_text.get(1.0, tk.END)
-            cities = [c.strip() for c in cities_text.split('\n') if c.strip()]
-        else:
-            filename = self.cities_file_var.get()
-            if not filename:
-                messagebox.showerror("Error", "Please select a cities file")
-                return []
-            try:
-                cities = self.load_cities_from_file(filename)
-            except Exception as e:
-                messagebox.showerror("Error", f"Error loading cities file: {e}")
-                return []
-        return cities
+            return [c.strip() for c in cities_text.split('\n') if c.strip()]
+
+        filename = self.cities_file_var.get()
+        if not filename:
+            raise ValueError("Please select a cities file.")
+        try:
+            return self.load_cities_from_file(filename)
+        except Exception as e:
+            raise ValueError(f"Error loading cities file: {e}")
 
     def load_cities_from_file(self, filename):
         """Load cities from file"""
@@ -516,121 +590,171 @@ class GoogleMapsScraperGUI:
                     cities.append(city)
         return cities
 
-    def start_scraping(self):
-        """Start scraping in a separate thread"""
-        if not self.query_var.get():
-            messagebox.showerror("Error", "Please enter a search query")
-            return
+    def _read_int(self, var, label, minimum):
+        try:
+            value = int(var.get())
+        except (tk.TclError, ValueError):
+            raise ValueError(f"{label} must be a whole number.")
+        if value < minimum:
+            raise ValueError(f"{label} must be {minimum} or more.")
+        return value
+
+    def _collect_settings(self):
+        """Read and validate every option on the main thread, so worker threads never touch Tk variables.
+        Raises ValueError with a message that is safe to show the user."""
+        query = self.query_var.get().strip()
+        if not query:
+            raise ValueError("Please enter a search query.")
 
         cities = self.get_cities_list()
         if not cities:
-            messagebox.showerror("Error", "Please enter or select cities")
-            return
+            raise ValueError("Please enter or select cities.")
 
-        if not (self.export_csv_var.get() or self.export_json_var.get() or self.export_excel_var.get()
-                or self.sqlite_var.get().strip() or self.postgres_var.get().strip()):
-            messagebox.showerror("Error", "Please select at least one output format or database export")
+        formats = tuple(name for name, var in (("csv", self.export_csv_var), ("json", self.export_json_var),
+                                               ("excel", self.export_excel_var)) if var.get())
+        sqlite_db = self.sqlite_var.get().strip()
+        postgres_conn = self.postgres_var.get().strip()
+        if not (formats or sqlite_db or postgres_conn):
+            raise ValueError("Please select at least one output format or database export.")
+
+        return ScrapeSettings(
+            query=query,
+            cities=tuple(cities),
+            output=self.output_var.get().strip() or "google_maps_results",
+            formats=formats,
+            sqlite_db=sqlite_db,
+            postgres_conn=postgres_conn,
+            headless=self.headless_var.get(),
+            verbose=self.verbose_var.get(),
+            test_mode=self.test_var.get(),
+            limit=self._read_int(self.limit_var, "Limit Cities", 0),
+            max_results=self._read_int(self.max_results_var, "Max Results Per City", 0),
+            delay=self._read_int(self.delay_var, "Delay Between Cities", 0),
+            workers=self._read_int(self.workers_var, "Parallel Workers", 1),
+            proxy=self.proxy_var.get().strip(),
+            schedule_mode=self.schedule_var.get(),
+        )
+
+    def start_scraping(self):
+        """Validate the options, then scrape in a separate thread"""
+        try:
+            settings = self._collect_settings()
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
             return
 
         self.scraping = True
+        self.stop_event.clear()
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
 
-        # Run scraping in thread
-        thread = threading.Thread(target=self.scrape_thread, args=(cities,), daemon=True)
-        thread.start()
+        self.worker_thread = threading.Thread(target=self.scrape_thread, args=(settings,), daemon=True)
+        self.worker_thread.start()
 
-    def scrape_thread(self, cities):
-        """Scraping thread: resolves options, then runs once or on a schedule"""
+    def scrape_thread(self, settings):
+        """Scraping thread: applies the limits, then runs once or on a schedule"""
         try:
             # Import lazily so a missing google_maps_scraper.py doesn't crash the GUI on launch
             try:
                 from google_maps_scraper import GoogleMapsScraper as Scraper
-            except ImportError:
-                self.logger.error("ERROR: google_maps_scraper.py not found in same folder!")
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Error",
-                    "google_maps_scraper.py not found!\n\nMake sure both files are in the same folder:\n"
-                    "- google_maps_scraper.py\n- google_maps_scraper_gui.py"))
+            except ImportError as e:
+                self.logger.error(f"Could not load google_maps_scraper.py: {e}")
+                self._show_dialog_safe(
+                    "showerror", "Error",
+                    f"Could not load google_maps_scraper.py:\n{e}\n\nMake sure both files are in the same folder:\n"
+                    "- google_maps_scraper.py\n- google_maps_scraper_gui.py\n\n"
+                    "and that the packages in requirements.txt are installed.")
                 return
 
             logging.getLogger('google_maps_scraper').setLevel(
-                logging.DEBUG if self.verbose_var.get() else logging.INFO)
+                logging.DEBUG if settings.verbose else logging.INFO)
 
-            if self.limit_var.get() > 0:
-                cities = cities[:self.limit_var.get()]
+            cities = list(settings.cities)
+            if settings.limit > 0:
+                cities = cities[:settings.limit]
                 self.logger.info(f"Limited to first {len(cities)} cities")
 
-            if self.test_var.get():
+            if settings.test_mode:
                 cities = cities[:1]
                 self.logger.info("TEST MODE: Processing only first city")
 
-            proxy = self.proxy_var.get().strip() or None
-            workers = max(1, self.workers_var.get())
-            schedule_choice = self.schedule_var.get()
-
-            if schedule_choice and schedule_choice != "None":
-                self.run_scheduled_job(Scraper, cities, proxy, workers, schedule_choice)
+            if settings.schedule_mode != "None":
+                self.run_scheduled_job(Scraper, cities, settings)
             else:
-                self.execute_job(Scraper, cities, proxy, workers)
+                self.execute_job(Scraper, cities, settings)
 
         except Exception as e:
             self.logger.error(f"Error during scraping: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Error during scraping: {e}"))
+            self._show_dialog_safe("showerror", "Error", f"Error during scraping: {e}")
         finally:
-            self.root.after(0, self._reset_controls)
+            self._post(self._reset_controls)
 
-    def run_scheduled_job(self, Scraper, cities, proxy, workers, schedule_choice):
+    def run_scheduled_job(self, Scraper, cities, settings):
         """Run the job immediately, then keep re-running it on the chosen interval until Stop is pressed"""
         scheduler = schedule.Scheduler()  # dedicated instance: avoids leaking jobs into schedule's global state
-        job = lambda: self.execute_job(Scraper, cities, proxy, workers)
 
-        if schedule_choice == 'daily':
+        def job():
+            try:
+                self.execute_job(Scraper, cities, settings, notify=False)
+            except Exception as e:
+                self.logger.error(f"Scheduled run failed, will retry on the next cycle: {e}")
+            if self.scraping:
+                self._update_progress_safe(0, "Waiting for next scheduled run...")
+
+        if settings.schedule_mode == 'daily':
             scheduler.every().day.at("00:00").do(job)
-        elif schedule_choice == 'hourly':
+        elif settings.schedule_mode == 'hourly':
             scheduler.every().hour.do(job)
-        elif schedule_choice == 'weekly':
+        elif settings.schedule_mode == 'weekly':
             scheduler.every().week.do(job)
 
-        self.logger.info(f"📅 Scheduler initialized. Job will run: {schedule_choice}")
+        self.logger.info(f"📅 Scheduler initialized. Job will run: {settings.schedule_mode}")
         job()
 
         self.logger.info("⏳ Waiting for next scheduled run... (Stop cancels it)")
         while self.scraping:
             scheduler.run_pending()
-            time.sleep(1)
+            self.stop_event.wait(1)
         self.logger.info("Scheduler stopped")
 
-    def execute_job(self, Scraper, cities, proxy, workers):
-        """Scrape all cities once (single- or multi-threaded) and export the results"""
+    def execute_job(self, Scraper, cities, settings, notify=True):
+        """Scrape all cities once (single- or multi-threaded) and export the results.
+        notify=False (scheduled runs) skips the modal dialogs, which would pile up unattended."""
         total_cities = len(cities)
         all_results = []
-        query = self.query_var.get()
-        headless = self.headless_var.get()
-        delay = self.delay_var.get()
+        proxy = settings.proxy or None
+        query, headless, delay, workers = settings.query, settings.headless, settings.delay, settings.workers
+        max_results = settings.max_results or None
 
         if workers > 1:
             self.logger.info(f"🚀 Starting multi-threaded mode with {workers} concurrent browsers...")
 
-            def scrape_one_city(city):
-                worker_scraper = Scraper(headless=headless, proxy=proxy)
+            def scrape_one_city(city, pre_delay):
+                if pre_delay and self.stop_event.wait(Scraper.jittered_delay(pre_delay)):
+                    return None  # stopped during the cool-down: this city was never started
+                worker_scraper = self._open_scraper(Scraper, headless, proxy)
                 try:
-                    businesses = worker_scraper.search_google_maps(query, city)
+                    businesses = worker_scraper.search_google_maps(query, city, max_results)
                     for business in businesses:
                         business['city'] = city
                     return businesses
                 finally:
-                    worker_scraper.close()
+                    self._close_scraper(worker_scraper)
 
             completed = 0
+            submitted = 0
             cities_iter = iter(cities)
             pending = {}
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 def submit_next():
+                    nonlocal submitted
                     city = next(cities_iter, None)
                     if city is not None:
-                        pending[executor.submit(scrape_one_city, city)] = city
+                        # A worker's first city starts at once; each later one waits out the delay first
+                        pre_delay = delay if submitted >= workers else 0
+                        pending[executor.submit(scrape_one_city, city, pre_delay)] = city
+                        submitted += 1
 
                 for _ in range(min(workers, total_cities)):
                     if not self.scraping:
@@ -643,8 +767,9 @@ class GoogleMapsScraperGUI:
                         city = pending.pop(future)
                         try:
                             businesses = future.result()
-                            all_results.extend(businesses)
-                            self.logger.info(f"Found {len(businesses)} businesses in {city}")
+                            if businesses is not None:
+                                all_results.extend(businesses)
+                                self.logger.info(f"Found {len(businesses)} businesses in {city}")
                         except Exception as e:
                             self.logger.error(f"Error processing city {city}: {e}")
 
@@ -655,15 +780,11 @@ class GoogleMapsScraperGUI:
                         # Stop requested: let already-running cities finish, don't start new ones
                         if self.scraping:
                             submit_next()
-
-            if not self.scraping:
-                self.logger.info("Scraping cancelled by user")
         else:
-            scraper = Scraper(headless=headless, proxy=proxy)
+            scraper = self._open_scraper(Scraper, headless, proxy)
             try:
                 for i, city in enumerate(cities, 1):
                     if not self.scraping:
-                        self.logger.info("Scraping cancelled by user")
                         break
 
                     progress = (i - 1) / total_cities * 100
@@ -671,64 +792,100 @@ class GoogleMapsScraperGUI:
                     self.logger.info(f"Processing city {i}/{total_cities}: {city}")
 
                     try:
-                        businesses = scraper.search_google_maps(query, city)
+                        businesses = scraper.search_google_maps(query, city, max_results)
                         for business in businesses:
                             business['city'] = city
                         all_results.extend(businesses)
                         self.logger.info(f"Found {len(businesses)} businesses in {city}")
 
                         if i < total_cities:
-                            time.sleep(delay)
+                            scraper.pause(Scraper.jittered_delay(delay))
                     except Exception as e:
                         self.logger.error(f"Error processing city {city}: {e}")
             finally:
-                scraper.close()
+                self._close_scraper(scraper)
+
+        cancelled = not self.scraping
+        if cancelled:
+            self.logger.info("Scraping cancelled by user")
 
         if all_results:
             self._update_progress_safe(100, "Saving results...")
             self.logger.info("Saving results...")
-            self.save_results(Scraper, all_results)
+            failed_exports = self.save_results(Scraper, all_results, settings)
             self.display_statistics(all_results)
-            self._set_status_safe("✅ Scraping completed successfully!")
-            self.logger.info("✅ Scraping completed successfully!")
-            self.root.after(0, lambda: messagebox.showinfo(
-                "Success", f"Scraping completed!\nTotal: {len(all_results)} companies found"))
+            icon, done_text = ("⏹", "Scraping stopped. Partial results were saved.") if cancelled \
+                else ("✅", "Scraping completed successfully!")
+            if failed_exports:
+                icon, done_text = "⚠️", f"Scraping finished, but these exports failed: {', '.join(failed_exports)}. See the log."
+            self._set_status_safe(f"{icon} {done_text}")
+            self.logger.info(f"{icon} {done_text}")
+            if notify:
+                kind, title = ("showwarning", "Warning") if failed_exports else ("showinfo", "Success")
+                self._show_dialog_safe(kind, title, f"{done_text}\nTotal: {len(all_results)} companies found")
         else:
             self._set_status_safe("❌ No results found")
             self.logger.warning("No results found")
-            self.root.after(0, lambda: messagebox.showwarning("Warning", "No results found"))
+            if notify:
+                self._show_dialog_safe("showwarning", "Warning", "No results found")
 
         return all_results
 
-    def save_results(self, Scraper, all_results):
-        """Export via the shared Scraper class's own exporters, so CSV/JSON/Excel/SQLite/Postgres
-        all use the same up-to-date field set (including city/hours/image) as the CLI."""
-        exporter = Scraper.__new__(Scraper)  # skip __init__: exporting needs no browser
-        exporter.results = all_results
+    def save_results(self, Scraper, all_results, settings):
+        """Export through the shared Scraper class, so CSV/JSON/Excel/SQLite/Postgres
+        all use the same field set (including city/hours/image) as the CLI.
+        Returns the names of any exports that failed."""
+        exporter = Scraper.for_export(all_results)
+        return exporter.export_all(settings.output, settings.formats,
+                                   settings.sqlite_db or None, settings.postgres_conn or None)
+
+    def _open_scraper(self, Scraper, headless, proxy):
+        """Start a browser and register it, so closing the window can shut down any that are still open"""
+        scraper = Scraper(headless=headless, proxy=proxy, stop_event=self.stop_event)
+        with self._scrapers_lock:
+            self._active_scrapers.add(scraper)
+        return scraper
+
+    def _close_scraper(self, scraper):
+        with self._scrapers_lock:
+            self._active_scrapers.discard(scraper)
         try:
-            output = self.output_var.get()
-            if self.export_csv_var.get():
-                exporter.save_to_csv(f"{output}.csv")
-            if self.export_json_var.get():
-                exporter.save_to_json(f"{output}.json")
-            if self.export_excel_var.get():
-                exporter.save_to_excel(f"{output}.xlsx")
-
-            sqlite_db = self.sqlite_var.get().strip()
-            if sqlite_db:
-                exporter.save_to_sqlite(sqlite_db)
-
-            postgres_conn = self.postgres_var.get().strip()
-            if postgres_conn:
-                exporter.save_to_postgres(postgres_conn)
+            scraper.close()
         except Exception as e:
-            self.logger.error(f"Error saving results: {e}")
+            self.logger.warning(f"Error closing browser: {e}")
 
     def stop_scraping(self):
-        """Stop scraping"""
+        """Stop scraping: browsers wake from their waits and the run ends within a moment"""
         self.scraping = False
+        self.stop_event.set()
         self.logger.info("Stopping scraper...")
         self.status_var.set("Stopping...")
+
+    def on_close(self):
+        """Window close: stop any running job and shut its browsers down before exiting"""
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            self.root.destroy()
+            return
+        if not messagebox.askyesno("Quit", "A scrape is still running. Stop it and exit?"):
+            return
+        self.stop_scraping()
+        self.status_var.set("Closing browsers...")
+        self._close_deadline = time.monotonic() + 30
+        self._finish_close()
+
+    def _finish_close(self):
+        if self.worker_thread.is_alive() and time.monotonic() < self._close_deadline:
+            self.root.after(200, self._finish_close)
+            return
+        # Out of time (a page load can hang): quit any browser still open so no Chrome process is left behind
+        with self._scrapers_lock:
+            leftovers = list(self._active_scrapers)
+        for scraper in leftovers:
+            try:
+                scraper.close()
+            except Exception:
+                pass
+        self.root.destroy()
 
     def _reset_controls(self):
         """Reset UI to idle state - must run on the main thread"""
@@ -738,16 +895,27 @@ class GoogleMapsScraperGUI:
         self.stop_button.config(state=tk.DISABLED)
         self.scraping = False
 
+    def _post(self, func, *args):
+        """Run func on the Tk main thread. Quietly does nothing if the window is already gone."""
+        try:
+            self.root.after(0, func, *args)
+        except (RuntimeError, tk.TclError):
+            pass
+
     def _update_progress_safe(self, progress, status_text):
         """Schedule a progress/status update on the main thread"""
         def update():
             self.progress_var.set(progress)
             self.progress_label.config(text=f"{int(progress)}%")
             self.status_var.set(status_text)
-        self.root.after(0, update)
+        self._post(update)
 
     def _set_status_safe(self, text):
-        self.root.after(0, lambda: self.status_var.set(text))
+        self._post(lambda: self.status_var.set(text))
+
+    def _show_dialog_safe(self, kind, title, message):
+        # The caller passes a finished message: a lambda over an except-block variable is unbound once the block ends
+        self._post(lambda: getattr(messagebox, kind)(title, message))
 
     def display_statistics(self, results):
         """Display statistics"""
@@ -774,6 +942,7 @@ class GoogleMapsScraperGUI:
         self.logger.info(f"🕒 Companies with hours: {with_hours} ({with_hours/len(results)*100:.1f}%)")
 
 if __name__ == "__main__":
+    set_windows_app_id()
     root = tk.Tk()
     app = GoogleMapsScraperGUI(root)
     root.mainloop()

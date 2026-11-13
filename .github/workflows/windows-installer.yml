@@ -1,0 +1,104 @@
+name: Windows installer
+
+# Builds AGMS.exe with PyInstaller, checks it, and wraps it in a setup file with Inno Setup.
+#
+#   Push a tag such as v1.3.2  -> builds the setup file and attaches it to a GitHub release.
+#   Run it by hand (Actions tab) -> builds the setup file and keeps it as a downloadable artifact.
+#
+# The tag must match __version__ in the code, so bump both files first, then tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write  # lets the last step attach the setup file to a release
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Read the version
+        id: version
+        shell: pwsh
+        run: |
+          $version = .\build_windows.ps1 -VersionOnly
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version"
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ($env:TAG -ne "v$env:VERSION") {
+            throw "The tag is $env:TAG but the code says version $env:VERSION. Use the tag v$env:VERSION, or change the version."
+          }
+
+      - name: Install the Python packages
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyinstaller>=6.10"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco upgrade innosetup --no-progress -y
+
+      - name: Build the app, test it, and build the setup file
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      - name: Write a checksum
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $setup = Get-Item "dist\installer\AGMS-Setup-$env:VERSION.exe"
+          $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($setup.Name)" | Out-File -FilePath "$($setup.FullName).sha256" -Encoding ascii
+          Write-Host "$($setup.Name)  $hash  ($([math]::Round($setup.Length / 1MB, 1)) MB)"
+
+      - name: Keep the setup file as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGMS-Setup-${{ steps.version.outputs.version }}
+          path: dist/installer/*
+          if-no-files-found: error
+
+      - name: Attach the setup file to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG --title $env:TAG --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw "Could not create the release" }
+          }
+          gh release upload $env:TAG (Get-ChildItem dist\installer\*).FullName --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload the setup file" }

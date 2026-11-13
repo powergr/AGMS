@@ -44,6 +44,16 @@ The script has updated to work with all the latest changes from Google. Please o
 
 ## Installation
 
+### Windows installer (easiest, no Python needed)
+
+1. Download `AGMS-Setup-<version>.exe` from the [latest release](https://github.com/powergr/AGMS/releases/latest).
+2. Run it. It installs for your own account, so it needs no administrator rights.
+3. Start **AGMS** from the Start menu. You still need Google Chrome installed.
+
+Results are saved in `Documents\AGMS`. Windows may show a "Windows protected your PC" warning, because the setup file is not code signed. Choose **More info**, then **Run anyway**. You can compare the download with the `.sha256` file on the release page.
+
+The installed app is the graphical version. To use the command line, or to run from source, follow the steps below.
+
 ### Prerequisites
 
 - Python 3.7 or higher
@@ -407,6 +417,9 @@ The scraper includes built-in delays:
 - ✅ Save Logs and Save Settings now work with emoji and non-English text on every Python version
 - ✅ The GUI maximizes on launch on Linux too, instead of failing at startup
 - ✅ The proxy password is no longer written to the log, and unused code was removed
+- ✅ Added a Windows setup file. A GitHub Actions workflow builds `AGMS.exe`, tests it, and packages it with Inno Setup. The installed app saves its results in `Documents\AGMS`
+- ✅ Fixed PostgreSQL export. With SQLAlchemy 2.1, a plain `postgresql://` URL looked for a driver this project does not install, so the export failed. It now uses `psycopg2`, and `postgres://` URLs work too
+- ✅ Fixed the PostgreSQL example in this README, which could never work
 
 ## v1.3.1
 
@@ -474,6 +487,25 @@ pip install -r requirements.txt
 # Run tests
 python google_maps_scraper.py -q "test query" -c "Test City" --test
 ```
+
+### Building the Windows installer
+
+A GitHub Actions workflow builds the setup file for you.
+
+1. Set the same `__version__` in `google_maps_scraper.py` and `google_maps_scraper_gui.py`.
+2. Push a tag that matches it, for example `v1.3.2`.
+3. The workflow in `.github/workflows/windows-installer.yml` builds the app with PyInstaller, runs a self-test on it, and builds the setup file with Inno Setup. It then attaches `AGMS-Setup-1.3.2.exe` and its checksum to a GitHub release.
+
+To try it without a release, open the **Actions** tab, choose **Windows installer**, and select **Run workflow**. The setup file is kept as a downloadable artifact on that run.
+
+To build on your own machine, install Inno Setup 6.3 or newer, then run:
+
+```bash
+pip install -r requirements.txt pyinstaller
+powershell -ExecutionPolicy Bypass -File build_windows.ps1
+```
+
+The setup file appears in `dist\installer`. Add `-SkipInstaller` to build and test only the app, which lands in `dist\AGMS`. The self-test is part of the app, so you can also run `AGMS.exe --self-test` and read `agms_selftest.txt` in your temp folder.
 
 ## License
 
@@ -608,7 +640,7 @@ python google_maps_scraper.py --version
 
    ```bash
 
-   python google_maps_scraper.py -q "plumbers" -c "Miami, USA" --postgres "dbname=maps user=admin password=123 host=localhost"
+   python google_maps_scraper.py -q "plumbers" -c "Miami, USA" --postgres "postgresql://admin:password@localhost/maps"
    ```
 
 3. **Excel Export:**

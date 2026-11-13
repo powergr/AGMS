@@ -23,6 +23,32 @@ COLOR_ACCENT = "#D9720C"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def resource_path(name):
+    """Bundled files sit next to this script, or in PyInstaller's unpack folder in the Windows build"""
+    return os.path.join(getattr(sys, "_MEIPASS", APP_DIR), name)
+
+
+def documents_folder():
+    """The user's real Documents folder, including when OneDrive has moved it"""
+    try:
+        buffer = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buffer) == 0:  # 5 = CSIDL_PERSONAL
+            return buffer.value
+    except (AttributeError, OSError):
+        pass
+    return os.path.join(os.path.expanduser("~"), "Documents")
+
+
+def prepare_output_folder():
+    """The installed app sits in a folder users can't write to, so the Windows build saves
+    results (any file with a relative name) in Documents\\AGMS instead"""
+    if not getattr(sys, "frozen", False):
+        return
+    folder = os.path.join(documents_folder(), "AGMS")
+    os.makedirs(folder, exist_ok=True)
+    os.chdir(folder)
+
+
 def set_windows_app_id():
     """Give the process its own taskbar identity, so Windows shows our icon instead of python.exe's"""
     if sys.platform == "win32":
@@ -122,10 +148,11 @@ class GoogleMapsScraperGUI:
 
         self.create_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.logger.info(f"Files with a relative name are saved in: {os.getcwd()}")
 
     def _set_window_icon(self):
         try:
-            self.root.iconbitmap(os.path.join(APP_DIR, "icon.ico"))
+            self.root.iconbitmap(resource_path("icon.ico"))
         except tk.TclError as e:
             print(f"Could not load icon: {e}")
 
@@ -941,7 +968,72 @@ class GoogleMapsScraperGUI:
         self.logger.info(f"📍 Companies with addresses: {with_addresses} ({with_addresses/len(results)*100:.1f}%)")
         self.logger.info(f"🕒 Companies with hours: {with_hours} ({with_hours/len(results)*100:.1f}%)")
 
+def run_self_test():
+    """Used by the Windows build to prove the packaged app is complete: it loads every module the
+    scraper needs and runs each export format. A build that lost a dependency fails here, not on a
+    user's computer. The report goes to the temp folder because a windowed exe has no console."""
+    import importlib
+    import tempfile
+
+    lines = []
+    failed = False
+
+    def step(name, action):
+        nonlocal failed
+        try:
+            action()
+            lines.append(f"ok    {name}")
+        except Exception as e:
+            failed = True
+            lines.append(f"FAIL  {name}: {type(e).__name__}: {e}")
+
+    for module in ("selenium", "webdriver_manager.chrome", "bs4", "requests", "schedule", "pandas",
+                   "openpyxl", "sqlalchemy", "psycopg2", "google_maps_scraper"):
+        step(f"import {module}", lambda module=module: importlib.import_module(module))
+
+    def icon_is_bundled():
+        if not os.path.exists(resource_path("icon.ico")):
+            raise FileNotFoundError(resource_path("icon.ico"))
+
+    def postgres_driver_loads():
+        import sqlalchemy
+        from google_maps_scraper import normalize_postgres_url
+        # Creating the engine loads the driver, and never connects
+        sqlalchemy.create_engine(normalize_postgres_url("postgresql://user:password@localhost/db"))
+
+    def every_export_format_works():
+        from google_maps_scraper import GoogleMapsScraper
+        sample = [{'company': 'Self Test Co', 'address': '1 Main St', 'phone': '1', 'website': 'https://example.com',
+                   'email': 'info@example.com', 'rating': '4.5', 'reviews': '10', 'hours': '9-5', 'image': '',
+                   'city': 'Paris'}]
+        with tempfile.TemporaryDirectory() as folder:
+            base = os.path.join(folder, "selftest")
+            database = os.path.join(folder, "selftest.db")
+            broken = GoogleMapsScraper.for_export(sample).export_all(base, ["csv", "json", "excel"], sqlite_db=database)
+            if broken:
+                raise RuntimeError(f"these exports failed: {', '.join(broken)}")
+            for path in (base + ".csv", base + ".json", base + ".xlsx", database):
+                if not os.path.exists(path):
+                    raise FileNotFoundError(path)
+
+    step("icon.ico is bundled", icon_is_bundled)
+    step("PostgreSQL driver loads", postgres_driver_loads)
+    step("CSV, JSON, Excel and SQLite exports work", every_export_format_works)
+
+    report = "\n".join(lines) + "\n" + ("SELF-TEST FAILED" if failed else "SELF-TEST PASSED") + "\n"
+    try:
+        with open(os.path.join(tempfile.gettempdir(), "agms_selftest.txt"), "w", encoding="utf-8") as f:
+            f.write(report)
+    except OSError:
+        pass
+    print(report)
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(run_self_test())
+    prepare_output_folder()
     set_windows_app_id()
     root = tk.Tk()
     app = GoogleMapsScraperGUI(root)

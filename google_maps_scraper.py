@@ -80,6 +80,15 @@ def pick_best_email(candidates, website=None):
 
     return min(cleaned, key=rank)
 
+def normalize_postgres_url(connection_string):
+    """SQLAlchemy 2.1 made a plain postgresql:// URL use the newer psycopg driver, but this project
+    installs psycopg2, so name that driver. The postgres:// form that many hosts hand out is accepted too."""
+    for prefix in ("postgresql://", "postgres://"):
+        if connection_string.startswith(prefix):
+            return "postgresql+psycopg2://" + connection_string[len(prefix):]
+    return connection_string
+
+
 class GoogleMapsScraper:
     def __init__(self, headless=True, proxy=None, stop_event=None):
         self.proxy = proxy
@@ -861,7 +870,7 @@ class GoogleMapsScraper:
         try:
             formatted_results = self.format_results_for_export()
             df = pd.DataFrame(formatted_results)
-            engine = create_engine(connection_string)
+            engine = create_engine(normalize_postgres_url(connection_string))
             df.to_sql('businesses', engine, if_exists='append', index=False)
             logger.info("Results saved successfully to PostgreSQL database")
         except Exception as e:

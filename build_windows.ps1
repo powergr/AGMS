@@ -2,12 +2,15 @@
 #
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1                  app + self-test + setup file
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1 -SkipInstaller   app + self-test only
+#   Add -SkipOnlineTest if Chrome is not installed here or you are offline: the self-test then
+#   skips the HTTPS request and the Chrome start.
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1 -VersionOnly     print the version and stop
 #
 # Needs the packages from requirements.txt plus pyinstaller in the active Python.
 # The setup file step needs Inno Setup 6 (https://jrsoftware.org/isdl.php).
 param(
     [switch]$SkipInstaller,
+    [switch]$SkipOnlineTest,
     [switch]$VersionOnly
 )
 
@@ -45,13 +48,16 @@ python -m PyInstaller --noconfirm --clean --noupx --windowed `
     --hidden-import openpyxl `
     --hidden-import psycopg2 `
     --collect-submodules sqlalchemy.dialects `
+    --collect-submodules selenium.webdriver `
     google_maps_scraper_gui.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 # A windowed exe returns at once when called directly, so start it and wait for the exit code
 $report = Join-Path $env:TEMP "agms_selftest.txt"
 Remove-Item $report -ErrorAction SilentlyContinue
-$test = Start-Process -FilePath "$PSScriptRoot\dist\AGMS\AGMS.exe" -ArgumentList "--self-test" -Wait -PassThru
+$testArguments = @("--self-test")
+if (-not $SkipOnlineTest) { $testArguments += "--online" }
+$test = Start-Process -FilePath "$PSScriptRoot\dist\AGMS\AGMS.exe" -ArgumentList $testArguments -Wait -PassThru
 if (Test-Path $report) { Get-Content $report }
 if ($test.ExitCode -ne 0) { throw "The built app failed its self-test. See the report above." }
 

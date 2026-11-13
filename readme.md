@@ -417,7 +417,7 @@ The scraper includes built-in delays:
 - ✅ Save Logs and Save Settings now work with emoji and non-English text on every Python version
 - ✅ The GUI maximizes on launch on Linux too, instead of failing at startup
 - ✅ The proxy password is no longer written to the log, and unused code was removed
-- ✅ Added a Windows setup file. A GitHub Actions workflow builds `AGMS.exe`, tests it, and packages it with Inno Setup. The installed app saves its results in `Documents\AGMS`
+- ✅ Added a Windows setup file. A GitHub Actions workflow builds `AGMS.exe`, tests it (including a real Chrome start), and packages it with Inno Setup. The installed app saves its results in `Documents\AGMS`
 - ✅ Fixed PostgreSQL export. With SQLAlchemy 2.1, a plain `postgresql://` URL looked for a driver this project does not install, so the export failed. It now uses `psycopg2`, and `postgres://` URLs work too
 - ✅ Fixed the PostgreSQL example in this README, which could never work
 
@@ -505,7 +505,7 @@ pip install -r requirements.txt pyinstaller
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
-The setup file appears in `dist\installer`. Add `-SkipInstaller` to build and test only the app, which lands in `dist\AGMS`. The self-test is part of the app, so you can also run `AGMS.exe --self-test` and read `agms_selftest.txt` in your temp folder.
+The setup file appears in `dist\installer`. Add `-SkipInstaller` to build and test only the app, which lands in `dist\AGMS`. The self-test is part of the app, so you can also run `AGMS.exe --self-test` and read `agms_selftest.txt` in your temp folder. Add `--online` to also make an HTTPS request and start Chrome. The build script does this by default, so it needs Chrome and an internet connection. Use `-SkipOnlineTest` to leave those out.
 
 ## License
 

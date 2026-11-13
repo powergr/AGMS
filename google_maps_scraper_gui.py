@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import schedule
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 # The whole UI sticks to exactly two accent colors: PRIMARY marks section
 # headers/progress so related options are easy to scan, ACCENT marks the one
@@ -971,7 +971,8 @@ class GoogleMapsScraperGUI:
 def run_self_test():
     """Used by the Windows build to prove the packaged app is complete: it loads every module the
     scraper needs and runs each export format. A build that lost a dependency fails here, not on a
-    user's computer. The report goes to the temp folder because a windowed exe has no console."""
+    user's computer. The report goes to the temp folder because a windowed exe has no console.
+    Add --online to also make an HTTPS request and start Chrome, which needs internet and Chrome installed."""
     import importlib
     import tempfile
 
@@ -1016,9 +1017,46 @@ def run_self_test():
                 if not os.path.exists(path):
                     raise FileNotFoundError(path)
 
+    def chrome_classes_resolve():
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support import expected_conditions
+        from selenium.webdriver.support.ui import WebDriverWait
+        from webdriver_manager.chrome import ChromeDriverManager
+        # Newer Selenium loads Chrome lazily by name, which PyInstaller cannot see by reading the code
+        getattr(webdriver, "Chrome")
+        Options()
+
+    def parse_html_and_pick_email():
+        from bs4 import BeautifulSoup
+        from google_maps_scraper import pick_best_email
+        link = BeautifulSoup('<a href="mailto:Info@Acme.com?subject=Hi">mail</a>', "html.parser").find("a")
+        if pick_best_email([link["href"][7:].split("?")[0]], "https://acme.com") != "info@acme.com":
+            raise RuntimeError("the email choice gave a wrong answer")
+
+    def https_works():
+        import requests
+        requests.get("https://example.com", timeout=20).raise_for_status()  # fails if the certificates are missing
+
+    def chrome_starts():
+        from google_maps_scraper import GoogleMapsScraper
+        scraper = GoogleMapsScraper(headless=True)  # the app's real start-up path, driver download included
+        try:
+            scraper.driver.get("about:blank")
+        finally:
+            scraper.close()
+
     step("icon.ico is bundled", icon_is_bundled)
     step("PostgreSQL driver loads", postgres_driver_loads)
+    step("Chrome driver classes load", chrome_classes_resolve)
     step("CSV, JSON, Excel and SQLite exports work", every_export_format_works)
+    step("HTML parsing and email choice work", parse_html_and_pick_email)
+    if "--online" in sys.argv[1:]:
+        step("HTTPS requests work", https_works)
+        step("Chrome starts and loads a page", chrome_starts)
 
     report = "\n".join(lines) + "\n" + ("SELF-TEST FAILED" if failed else "SELF-TEST PASSED") + "\n"
     try:

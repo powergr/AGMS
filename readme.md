@@ -23,7 +23,7 @@ The script has updated to work with all the latest changes from Google. Please o
 - 🔍 **Smart Pagination**: Automatically loads all available results
 - 🎭 **Headless Mode**: Run with or without visible browser
 - ⚡ **CLI Interface**: Easy-to-use command-line interface with multiple options
-- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with every option of the CLI, plus a menu bar and a built-in guide. See [docs/GUI_setup_guide.md](docs/GUI_setup_guide.md) and [docs/CLI-vs-GUI.md](docs/CLI-vs-GUI.md)
+- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with every option of the CLI, plus a menu bar and a built-in guide.
 - 📋 **Job Queue (GUI)**: Line up several searches. They run one after another, and each saves to its own files
 - 🧵 **Multi-Threaded**: Run several browsers in parallel to scrape faster
 - 🌐 **Proxy Support**: Route requests through a proxy server
@@ -405,7 +405,7 @@ The scraper includes built-in delays:
 
 ### Version History
 
-## Next version (not released yet)
+## v1.3.4
 
 - ✅ **Job queue in the GUI.** Add several searches, each with its own file name, and they run one after another using the same cities and options. A Status column shows Waiting, Running, Done, Failed, Stopped or Skipped. You can reorder, remove, edit and clear jobs, and Save Settings keeps the queue
 - ✅ The output file name moved from the Output & Export card to a **Save as** box next to the search query. Leave it empty and the name is made from the query, so Coffee shops is saved as coffee_shops. Names that clash, or that Windows would not accept, are refused when you add the job
@@ -415,7 +415,7 @@ The scraper includes built-in delays:
 - ✅ The taskbar icon is now sharp. The app is DPI aware, so Windows no longer stretches its window and icon on screens set above 100%, and it receives the icon size it asks for (40 and 20 pixels at 125%). The logo is redrawn as a solid navy disc with bold white letters and transparent corners, with frames for every size Windows uses
 - ✅ The whole window is now crisp on scaled screens, instead of being stretched by Windows
 
-## v1.3.3 (Current)
+## v1.3.3
 
 - ✅ Fixed the installed app failing on the first search with "No module named selenium.webdriver.chrome.webdriver". Newer Selenium loads Chrome by name, which the packager could not see, so the build now includes all of Selenium's driver modules
 - ✅ The build now tests the packaged app before it makes the setup file. The test loads every module, runs all export formats, makes an HTTPS request, and starts a real Chrome

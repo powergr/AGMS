@@ -23,7 +23,8 @@ The script has updated to work with all the latest changes from Google. Please o
 - 🔍 **Smart Pagination**: Automatically loads all available results
 - 🎭 **Headless Mode**: Run with or without visible browser
 - ⚡ **CLI Interface**: Easy-to-use command-line interface with multiple options
-- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with the same capabilities as the CLI. See [docs/GUI_setup_guide.md](docs/GUI_setup_guide.md) and [docs/CLI-vs-GUI.md](docs/CLI-vs-GUI.md)
+- 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with every option of the CLI, plus a menu bar and a built-in guide. See [docs/GUI_setup_guide.md](docs/GUI_setup_guide.md) and [docs/CLI-vs-GUI.md](docs/CLI-vs-GUI.md)
+- 📋 **Job Queue (GUI)**: Line up several searches. They run one after another, and each saves to its own files
 - 🧵 **Multi-Threaded**: Run several browsers in parallel to scrape faster
 - 🌐 **Proxy Support**: Route requests through a proxy server
 - ⏰ **Scheduling**: Re-run a job automatically on a daily, hourly, or weekly interval
@@ -52,7 +53,7 @@ The script has updated to work with all the latest changes from Google. Please o
 
 Results are saved in `Documents\AGMS`. Windows may show a "Windows protected your PC" warning, because the setup file is not code signed. Choose **More info**, then **Run anyway**. You can compare the download with the `.sha256` file on the release page.
 
-The installed app is the graphical version. To use the command line, or to run from source, follow the steps below.
+The installed app is the graphical version. Inside it, choose **Help, How to Use** (or press F1) for a guide to every feature. To use the command line, or to run from source, follow the steps below.
 
 ### Prerequisites
 
@@ -342,6 +343,13 @@ python google_maps_scraper.py -q "restaurants" -c "Paris, France" --verbose
   `EOFError`, while it waits for input that never arrives.
 - **`--sqlite` and `--postgres` always append.** There is no deduplication. Repeated runs, especially
   with `--schedule`, insert the same businesses again on every run instead of updating existing rows.
+- **Database rows do not say which search they came from.** When a GUI queue has several jobs, they all
+  write into the same table, so the rows from different searches are mixed. CSV, JSON and Excel files are
+  kept apart because each job has its own.
+- **Queue jobs share their cities and options.** Every job in the GUI queue uses the same cities, formats,
+  delay, workers and proxy. To search different cities, run a separate queue.
+- **The queue is GUI only.** The command line runs one query per command, so use several commands or a
+  batch file to run several searches.
 
 ## Performance Tips
 
@@ -397,7 +405,22 @@ The scraper includes built-in delays:
 
 ### Version History
 
-## v1.3.2 (Current)
+## Next version (not released yet)
+
+- ✅ **Job queue in the GUI.** Add several searches, each with its own file name, and they run one after another using the same cities and options. A Status column shows Waiting, Running, Done, Failed, Stopped or Skipped. You can reorder, remove, edit and clear jobs, and Save Settings keeps the queue
+- ✅ The output file name moved from the Output & Export card to a **Save as** box next to the search query. Leave it empty and the name is made from the query, so Coffee shops is saved as coffee_shops. Names that clash, or that Windows would not accept, are refused when you add the job
+- ✅ A failed job no longer stops the queue. One summary dialog covers the whole run, and Stop saves what the current job found and marks the rest as Skipped
+- ✅ New **menu bar** with File and Help. **Help, How to Use** (or F1) opens a scrollable guide to every feature, and **Help, About AGMS** shows the version, license, links and details you can copy
+- ✅ **File, Open Results Folder** opens the folder where your files are saved
+- ✅ The taskbar icon is now sharp. The app is DPI aware, so Windows no longer stretches its window and icon on screens set above 100%, and it receives the icon size it asks for (40 and 20 pixels at 125%). The logo is redrawn as a solid navy disc with bold white letters and transparent corners, with frames for every size Windows uses
+- ✅ The whole window is now crisp on scaled screens, instead of being stretched by Windows
+
+## v1.3.3 (Current)
+
+- ✅ Fixed the installed app failing on the first search with "No module named selenium.webdriver.chrome.webdriver". Newer Selenium loads Chrome by name, which the packager could not see, so the build now includes all of Selenium's driver modules
+- ✅ The build now tests the packaged app before it makes the setup file. The test loads every module, runs all export formats, makes an HTTPS request, and starts a real Chrome
+
+## v1.3.2
 
 - ✅ Fixed the Python icon showing in the taskbar. The icon now loads from the app folder, so it works from any launch location, and the app sets its own Windows taskbar identity
 - ✅ `--delay` now works in the CLI. It was accepted but ignored, and a fixed 8 to 12 second wait was used instead. The wait is now the delay you set, varied by 20% either way

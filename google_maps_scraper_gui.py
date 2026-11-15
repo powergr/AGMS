@@ -1,4 +1,6 @@
 import ctypes
+import hashlib
+import json
 import os
 import platform
 import re
@@ -10,11 +12,13 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
 import time
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import schedule
 
-__version__ = "1.3.4"
+__version__ = "1.3.5"
+PUBLISHER = "Pashalis Laoutaris"
+COPYRIGHT = f"Copyright (c) 2025 {PUBLISHER}"
 
 # The whole UI sticks to exactly two accent colors: PRIMARY marks section
 # headers/progress so related options are easy to scan, ACCENT marks the one
@@ -119,6 +123,298 @@ def strip_secrets(value):
     return re.sub(r"(?i)\bpassword\s*=\s*('[^']*'|\S*)\s*", "", value).strip()
 
 
+FORMAT_EXTENSIONS = {"csv": ".csv", "json": ".json", "excel": ".xlsx"}
+SETTINGS_EXTENSION = ".agms"
+SETTINGS_VERSION = 2
+MAX_SETTINGS_BYTES = 1_000_000  # a real settings file is a few KB: anything bigger is some other file
+ON_EXISTING_CHOICES = ("number", "overwrite", "skip")
+
+
+def output_paths(folder, name, formats):
+    """The result files one job writes: its name plus the extension of each chosen format"""
+    base = os.path.join(folder, name) if folder else name
+    return [base + FORMAT_EXTENSIONS[kind] for kind in formats if kind in FORMAT_EXTENSIONS]
+
+
+def existing_files(folder, name, formats):
+    return [path for path in output_paths(folder, name, formats) if os.path.exists(path)]
+
+
+def pick_output_name(folder, name, formats, policy):
+    """Decide what a job saves under when its files may already exist.
+    policy 'overwrite' keeps the name, 'skip' returns None, and 'number' finds the first free
+    name_2, name_3 and so on. Every format of one job gets the same number, so a set stays together."""
+    if not existing_files(folder, name, formats) or policy == "overwrite":
+        return name
+    if policy == "skip":
+        return None
+    for number in range(2, 10000):
+        candidate = f"{name}_{number}"
+        if not existing_files(folder, candidate, formats):
+            return candidate
+    raise RuntimeError(f"Could not find a free file name for '{name}'")
+
+
+def config_folder():
+    """Where AGMS keeps its own small files (preferences and the last session). AGMS_CONFIG_DIR overrides it."""
+    override = os.environ.get("AGMS_CONFIG_DIR")
+    if override:
+        return override
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "AGMS")
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "agms")
+
+
+def write_text_safely(path, text):
+    """Write a file so a crash or a full disk cannot leave half of it behind"""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(temporary, path)
+
+
+BOOLEAN_SETTINGS = ("csv", "json", "excel", "add_timestamp", "headless", "test_mode", "verbose")
+NUMBER_SETTINGS = {"limit": (0, 100), "max_results": (0, 1000), "delay": (0, 60), "workers": (1, 20)}
+TEXT_SETTINGS = ("query", "save_as", "cities_text", "cities_file", "folder", "sqlite", "postgres", "proxy")
+CHOICE_SETTINGS = {"cities_mode": ("list", "file"), "schedule": ("None", "daily", "hourly", "weekly")}
+OLD_TEXT_KEYS = {"query": "query", "output": "save_as", "export_csv": "csv", "export_json": "json",
+                 "export_excel": "excel", "headless": "headless", "test": "test_mode", "verbose": "verbose",
+                 "limit": "limit", "delay": "delay", "max_results": "max_results", "workers": "workers",
+                 "proxy": "proxy", "schedule": "schedule", "sqlite": "sqlite", "postgres": "postgres"}
+
+
+def normalize_settings(raw):
+    """Check every value of a settings file and keep the good ones. Returns (settings, notes), where
+    settings holds only valid values for known names (so a partial file changes only what it contains)
+    and notes lists what was ignored and why."""
+    clean, notes = {}, []
+    for key in BOOLEAN_SETTINGS:
+        if key in raw:
+            value = raw[key]
+            if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+                value = value.strip().lower() == "true"
+            if isinstance(value, bool):
+                clean[key] = value
+            else:
+                notes.append(f"Ignored '{key}': it should be true or false.")
+    for key, (low, high) in NUMBER_SETTINGS.items():
+        if key in raw:
+            value = raw[key]
+            try:
+                if isinstance(value, bool) or (isinstance(value, float) and value != int(value)):
+                    raise ValueError
+                clean[key] = max(low, min(high, int(str(value).strip())))
+            except (ValueError, TypeError):
+                notes.append(f"Ignored '{key}': it should be a whole number.")
+    for key in TEXT_SETTINGS:
+        if key in raw:
+            if isinstance(raw[key], str):
+                clean[key] = raw[key]
+            else:
+                notes.append(f"Ignored '{key}': it should be text.")
+    for key, allowed in CHOICE_SETTINGS.items():
+        if key in raw:
+            if raw[key] in allowed:
+                clean[key] = raw[key]
+            else:
+                notes.append(f"Ignored '{key}': {raw[key]!r} is not one of {', '.join(allowed)}.")
+    if "queue" in raw:
+        if isinstance(raw["queue"], list):
+            clean["queue"] = []
+            for item in raw["queue"]:
+                if isinstance(item, dict) and isinstance(item.get("query"), str):
+                    save_as = item.get("save_as", "")
+                    clean["queue"].append({"query": item["query"], "save_as": save_as if isinstance(save_as, str) else ""})
+                else:
+                    notes.append("Ignored a queue entry that has no search query.")
+        else:
+            notes.append("Ignored 'queue': it should be a list.")
+    return clean, notes
+
+
+def parse_settings_text(text):
+    """Read a settings file: the current JSON format, or the older key=value text format.
+    Returns (settings, notes). Raises ValueError, with a message safe to show, if this is not a settings file."""
+    stripped = text.lstrip("﻿ \t\r\n")
+    notes = []
+    if stripped.startswith("{"):
+        try:
+            raw = json.loads(stripped)
+        except ValueError:
+            raise ValueError("This file is damaged, so it cannot be read as AGMS settings.")
+        if not isinstance(raw, dict) or not isinstance(raw.get("agms_settings"), int):
+            raise ValueError("This is not an AGMS settings file. Results files cannot be loaded here.")
+        if raw["agms_settings"] > SETTINGS_VERSION:
+            notes.append("This file was saved by a newer AGMS. Settings this version does not know are ignored.")
+    else:
+        raw, queue = {}, []
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)  # split once: a Postgres URL contains '=' itself
+            if key == "job":
+                query, _, name = value.partition("\t")
+                queue.append({"query": query, "save_as": name})
+            elif key == "format":
+                raw["csv"], raw["json"] = value in ("csv", "both"), value in ("json", "both")
+            elif key in OLD_TEXT_KEYS:
+                raw[OLD_TEXT_KEYS[key]] = value
+        if queue:
+            raw["queue"] = queue
+        if not raw:
+            raise ValueError("This does not look like an AGMS settings file.")
+        notes.append("This is an older settings file. It had no cities, so your cities were not changed.")
+    clean, problems = normalize_settings(raw)
+    return clean, notes + problems
+
+
+MAX_RECENT = 6
+
+
+def prefs_path():
+    return os.path.join(config_folder(), "preferences.json")
+
+
+def session_path():
+    return os.path.join(config_folder(), "last_session" + SETTINGS_EXTENSION)
+
+
+def load_prefs():
+    """Small app preferences: whether to remember the last session, and the recent settings files"""
+    prefs = {"remember_session": True, "recent": []}
+    try:
+        with open(prefs_path(), "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            if isinstance(saved.get("remember_session"), bool):
+                prefs["remember_session"] = saved["remember_session"]
+            if isinstance(saved.get("recent"), list):
+                prefs["recent"] = [p for p in saved["recent"] if isinstance(p, str)][:MAX_RECENT]
+    except (OSError, ValueError):
+        pass  # no file yet, or an unreadable one: the defaults are fine
+    return prefs
+
+
+def save_prefs(prefs):
+    try:
+        write_text_safely(prefs_path(), json.dumps(prefs, indent=2))
+    except OSError:
+        pass  # a read-only profile must not stop the app
+
+
+CHECKPOINT_VERSION = 1
+CHECKPOINT_KEEP_DAYS = 30
+
+
+def progress_folder():
+    return os.path.join(config_folder(), "progress")
+
+
+def effective_cities(cities, limit, test_mode):
+    """The cities a run really uses after Limit Cities and Test Mode are applied"""
+    cities = list(cities)
+    if limit > 0:
+        cities = cities[:limit]
+    if test_mode:
+        cities = cities[:1]
+    return cities
+
+
+def job_key(query, cities, max_results, folder, output):
+    """Names one job for progress tracking. A different query, city list, Max Results, folder or file name is
+    a different job, so saved progress is never applied to a search it does not belong to."""
+    raw = json.dumps([query, list(cities), max_results, os.path.normcase(os.path.abspath(folder or ".")),
+                      os.path.normcase(output)], ensure_ascii=False)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+
+class Checkpoint:
+    """The progress of one job, kept on disk after every finished city. If the app is stopped, closed or
+    crashes, the next run can continue with the cities that are left instead of starting over.
+    done: city -> its businesses, for cities that were scraped to the end.
+    exported: database name -> cities already written there, so a database never gets a city twice."""
+
+    def __init__(self, key, query, cities):
+        self.key, self.query, self.cities = key, query, list(cities)
+        self.name = ""      # the file name this job saves under, kept so a resume replaces its own partial files
+        self.done = {}
+        self.exported = {}
+        self.saved_at = 0.0
+
+    @property
+    def path(self):
+        return os.path.join(progress_folder(), self.key + ".json")
+
+    @classmethod
+    def load(cls, key):
+        """The saved progress for this key, or None if there is none or the file cannot be trusted"""
+        try:
+            with open(os.path.join(progress_folder(), key + ".json"), "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if raw.get("version") != CHECKPOINT_VERSION or raw.get("key") != key:
+                return None
+            checkpoint = cls(key, str(raw["query"]), [str(c) for c in raw["cities"]])
+            checkpoint.name = str(raw.get("name", ""))
+            checkpoint.saved_at = float(raw.get("saved_at", 0))
+            for city, businesses in raw["done"].items():
+                if not isinstance(businesses, list) or not all(isinstance(b, dict) for b in businesses):
+                    return None
+                checkpoint.done[str(city)] = businesses
+            checkpoint.exported = {str(k): [str(c) for c in v] for k, v in raw.get("exported", {}).items()}
+            return checkpoint
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+
+    @classmethod
+    def discard(cls, key):
+        try:
+            os.remove(os.path.join(progress_folder(), key + ".json"))
+        except OSError:
+            pass
+
+    def mark_done(self, city, businesses):
+        self.done[city] = list(businesses)
+
+    def results(self, cities=None):
+        """Every saved business, in the order of the city list"""
+        order = cities if cities is not None else self.cities
+        return [business for city in dict.fromkeys(order) if city in self.done for business in self.done[city]]
+
+    def save(self):
+        """Write the progress. Returns False when the disk refuses, which only costs the ability to resume."""
+        self.saved_at = time.time()
+        data = {"version": CHECKPOINT_VERSION, "key": self.key, "query": self.query, "cities": self.cities,
+                "name": self.name, "saved_at": self.saved_at, "done": self.done, "exported": self.exported}
+        try:
+            write_text_safely(self.path, json.dumps(data, ensure_ascii=False))
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def delete(self):
+        self.discard(self.key)
+
+
+def prune_progress():
+    """Remove progress files that are old or unreadable, so the folder cannot grow forever"""
+    try:
+        names = os.listdir(progress_folder())
+    except OSError:
+        return
+    limit = time.time() - CHECKPOINT_KEEP_DAYS * 86400
+    for name in names:
+        path = os.path.join(progress_folder(), name)
+        try:
+            stale = os.path.getmtime(path) < limit or (name.endswith(".json") and Checkpoint.load(name[:-5]) is None)
+            if stale or name.endswith(".tmp"):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 @dataclass(frozen=True)
 class Job:
     """One search in the queue: what to look for, and the file name its results are saved under"""
@@ -134,6 +430,8 @@ class JobResult:
     cancelled: bool
     icon: str
     text: str
+    skipped: bool = False  # not run, because its files already existed and the user chose to skip such jobs
+    saved_as: str = ""     # the file name actually used, which may differ from job.output
 
 
 @dataclass(frozen=True)
@@ -154,6 +452,10 @@ class ScrapeSettings:
     workers: int
     proxy: str
     schedule_mode: str
+    folder: str = ""             # where result files go; empty means the current folder
+    timestamp: bool = False      # add the date and time to every file name
+    on_existing: str = "number"  # what to do when a result file already exists: number, overwrite or skip
+    resume: frozenset = frozenset()  # keys of the jobs that continue from saved progress (see job_key)
 
 
 class LogHandler(logging.Handler):
@@ -161,6 +463,15 @@ class LogHandler(logging.Handler):
     def __init__(self, text_widget):
         super().__init__()
         self.text_widget = text_widget
+
+    def handle(self, record):
+        """Skip logging's per-handler lock. From a worker thread, emit() waits for the Tk main thread to take
+        the line. If the main thread logs at that moment (pressing Stop does), it waits for the lock the worker
+        holds, and the window freezes for good. Nothing here needs the lock, because Tk runs one call at a time."""
+        if self.filter(record):
+            self.emit(record)
+            return True
+        return False
 
     def emit(self, record):
         if self.text_widget is None:
@@ -214,10 +525,13 @@ class GoogleMapsScraperGUI:
         self.job_status = []    # one status text per job, shown in the queue list
         self._help_window = None
         self._progress_base, self._progress_span, self._job_label = 0, 1, ""
+        self.prefs = load_prefs()
+        prune_progress()
 
         self.create_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.logger.info(f"Files with a relative name are saved in: {os.getcwd()}")
+        self._restore_session()
         self.root.after(250, lambda: self._apply_exact_icons(self.root))  # after Tk has mapped the window
 
     def _set_window_icon(self):
@@ -589,24 +903,34 @@ class GoogleMapsScraperGUI:
         ttk.Checkbutton(format_frame, text="CSV", variable=self.export_csv_var).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Checkbutton(format_frame, text="JSON", variable=self.export_json_var).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Checkbutton(format_frame, text="Excel", variable=self.export_excel_var).pack(side=tk.LEFT)
-        ttk.Label(frame, text="Each job saves to files named after its Save as box.", foreground="#666666").grid(
-            row=1, column=0, columnspan=2, sticky=tk.W)
 
-        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        ttk.Label(frame, text="Save in folder:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        folder_row = ttk.Frame(frame)
+        folder_row.grid(row=1, column=1, sticky=tk.EW, pady=5, padx=5)
+        folder_row.columnconfigure(0, weight=1)
+        self.folder_var = tk.StringVar(value="")
+        ttk.Entry(folder_row, textvariable=self.folder_var).grid(row=0, column=0, sticky=tk.EW)
+        ttk.Button(folder_row, text="Browse...", command=self.browse_output_folder).grid(row=0, column=1, padx=(5, 0))
+
+        self.timestamp_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="Add the date and time to file names", variable=self.timestamp_var).grid(
+            row=2, column=1, sticky=tk.W, padx=5)
+
+        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=8)
         ttk.Label(frame, text="Database export (optional)", font=("Segoe UI", 9, "bold")).grid(
-            row=3, column=0, columnspan=2, sticky=tk.W)
+            row=4, column=0, columnspan=2, sticky=tk.W)
 
-        ttk.Label(frame, text="SQLite DB file:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="SQLite DB file:").grid(row=5, column=0, sticky=tk.W, pady=5)
         sqlite_row = ttk.Frame(frame)
-        sqlite_row.grid(row=4, column=1, sticky=tk.EW, pady=5, padx=5)
+        sqlite_row.grid(row=5, column=1, sticky=tk.EW, pady=5, padx=5)
         sqlite_row.columnconfigure(0, weight=1)
         self.sqlite_var = tk.StringVar(value="")
         ttk.Entry(sqlite_row, textvariable=self.sqlite_var).grid(row=0, column=0, sticky=tk.EW)
         ttk.Button(sqlite_row, text="Browse...", command=self.browse_sqlite_file).grid(row=0, column=1, padx=(5, 0))
 
-        ttk.Label(frame, text="PostgreSQL connection string:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="PostgreSQL connection string:").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.postgres_var = tk.StringVar(value="")
-        ttk.Entry(frame, textvariable=self.postgres_var).grid(row=5, column=1, sticky=tk.EW, pady=5, padx=5)
+        ttk.Entry(frame, textvariable=self.postgres_var).grid(row=6, column=1, sticky=tk.EW, pady=5, padx=5)
 
     def _build_scraping_section(self, frame):
         """Scraping behavior, performance, proxy, and scheduling"""
@@ -681,11 +1005,19 @@ class GoogleMapsScraperGUI:
         if filename:
             self.sqlite_var.set(filename)
 
+    def browse_output_folder(self):
+        """Pick the folder the result files are saved in"""
+        folder = filedialog.askdirectory(initialdir=self._results_folder() if os.path.isdir(self._results_folder()) else None)
+        if folder:
+            self.folder_var.set(os.path.normpath(folder))
+
     def clear_form(self):
         """Clear all form fields"""
         self.query_var.set("")
         self.cities_text.delete(1.0, tk.END)
         self.output_var.set("")
+        self.folder_var.set("")
+        self.timestamp_var.set(False)
         if not self.scraping:
             self.jobs.clear()
             self.job_status.clear()
@@ -707,106 +1039,209 @@ class GoogleMapsScraperGUI:
         self.cities_file_var.set("")
         self.logger.info("Form cleared")
 
+    # ---- settings: save, load, recent files, and the remembered last session ----
+
+    @staticmethod
+    def _int_of(var, default):
+        try:
+            return int(var.get())
+        except (tk.TclError, ValueError):
+            return default
+
+    def _settings_snapshot(self):
+        """Every option, the cities and the queue as a dict, ready to save. Passwords are removed from the
+        proxy and the database string. Returns (data, passwords_were_removed)."""
+        proxy = self.proxy_var.get().strip()
+        postgres = self.postgres_var.get().strip()
+        safe_proxy, safe_postgres = strip_secrets(proxy), strip_secrets(postgres)
+        data = {
+            "agms_settings": SETTINGS_VERSION,
+            "saved_by": __version__,
+            "query": self.query_var.get(),
+            "save_as": self.output_var.get(),
+            "queue": [{"query": job.query, "save_as": job.output} for job in self.jobs],
+            "cities_mode": self.cities_mode_var.get(),
+            "cities_text": self.cities_text.get("1.0", "end-1c"),
+            "cities_file": self.cities_file_var.get(),
+            "csv": self.export_csv_var.get(),
+            "json": self.export_json_var.get(),
+            "excel": self.export_excel_var.get(),
+            "folder": self.folder_var.get(),
+            "add_timestamp": self.timestamp_var.get(),
+            "sqlite": self.sqlite_var.get(),
+            "postgres": safe_postgres,
+            "headless": self.headless_var.get(),
+            "test_mode": self.test_var.get(),
+            "verbose": self.verbose_var.get(),
+            "limit": self._int_of(self.limit_var, 0),
+            "max_results": self._int_of(self.max_results_var, 0),
+            "delay": self._int_of(self.delay_var, 10),
+            "workers": self._int_of(self.workers_var, 1),
+            "proxy": safe_proxy,
+            "schedule": self.schedule_var.get(),
+        }
+        return data, (safe_proxy, safe_postgres) != (proxy, postgres)
+
+    def _apply_settings(self, clean):
+        """Put already-checked settings into the form. Only the settings present in `clean` change.
+        Returns notes about anything that could not be applied."""
+        notes = []
+        variables = {
+            "query": self.query_var, "save_as": self.output_var, "cities_file": self.cities_file_var,
+            "csv": self.export_csv_var, "json": self.export_json_var, "excel": self.export_excel_var,
+            "folder": self.folder_var, "add_timestamp": self.timestamp_var, "sqlite": self.sqlite_var,
+            "postgres": self.postgres_var, "headless": self.headless_var, "test_mode": self.test_var,
+            "verbose": self.verbose_var, "limit": self.limit_var, "max_results": self.max_results_var,
+            "delay": self.delay_var, "workers": self.workers_var, "proxy": self.proxy_var,
+            "schedule": self.schedule_var,
+        }
+        for key, variable in variables.items():
+            if key in clean:
+                variable.set(clean[key])
+        self.update_delay_label(self._int_of(self.delay_var, 10))
+        if "cities_text" in clean:
+            self.cities_text.delete("1.0", tk.END)
+            self.cities_text.insert("1.0", clean["cities_text"])
+        if "cities_mode" in clean:
+            self.cities_mode_var.set(clean["cities_mode"])
+            self.update_cities_input()
+        if "queue" in clean:
+            if self.scraping:
+                notes.append("The queue was not changed, because a run is in progress.")
+            else:
+                jobs = []
+                for entry in clean["queue"]:
+                    try:
+                        jobs.append(self._make_job(entry["query"], entry["save_as"], jobs))
+                    except ValueError as problem:
+                        notes.append(f"Skipped the queue job '{entry['query'][:40]}': {problem}")
+                self.jobs[:] = jobs
+                self.job_status[:] = ["Waiting"] * len(jobs)
+                self._refresh_queue()
+        return notes
+
     def save_settings(self):
-        """Save current settings"""
-        filename = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
-        if filename:
-            try:
-                proxy = self.proxy_var.get().strip()
-                postgres = self.postgres_var.get().strip()
-                safe_proxy, safe_postgres = strip_secrets(proxy), strip_secrets(postgres)
-                with open(filename, 'w', encoding='utf-8') as f:
-                    f.write(f"query={self.query_var.get()}\n")
-                    f.write(f"output={self.output_var.get()}\n")
-                    for job in self.jobs:
-                        f.write(f"job={job.query}\t{job.output}\n")
-                    f.write(f"export_csv={self.export_csv_var.get()}\n")
-                    f.write(f"export_json={self.export_json_var.get()}\n")
-                    f.write(f"export_excel={self.export_excel_var.get()}\n")
-                    f.write(f"headless={self.headless_var.get()}\n")
-                    f.write(f"test={self.test_var.get()}\n")
-                    f.write(f"verbose={self.verbose_var.get()}\n")
-                    f.write(f"limit={self.limit_var.get()}\n")
-                    f.write(f"delay={self.delay_var.get()}\n")
-                    f.write(f"max_results={self.max_results_var.get()}\n")
-                    f.write(f"workers={self.workers_var.get()}\n")
-                    f.write(f"proxy={safe_proxy}\n")
-                    f.write(f"schedule={self.schedule_var.get()}\n")
-                    f.write(f"sqlite={self.sqlite_var.get()}\n")
-                    f.write(f"postgres={safe_postgres}\n")
-                self.logger.info(f"Settings saved to {filename}")
-                note = ""
-                if (safe_proxy, safe_postgres) != (proxy, postgres):
-                    note = "\n\nPasswords are never saved. Enter the proxy and database passwords again after loading."
-                messagebox.showinfo("Success", "Settings saved successfully!" + note)
-            except Exception as e:
-                self.logger.error(f"Error saving settings: {e}")
-                messagebox.showerror("Error", f"Error saving settings: {e}")
+        """Save the whole form to a file: search, queue, cities, output and scraping options"""
+        filename = filedialog.asksaveasfilename(
+            defaultextension=SETTINGS_EXTENSION, initialfile="agms_settings" + SETTINGS_EXTENSION,
+            filetypes=[("AGMS settings", "*" + SETTINGS_EXTENSION), ("All files", "*.*")])
+        if not filename:
+            return
+        try:
+            data, passwords_removed = self._settings_snapshot()
+            write_text_safely(filename, json.dumps(data, indent=2, ensure_ascii=False))
+        except Exception as e:
+            self.logger.error(f"Error saving settings: {e}")
+            messagebox.showerror("Error", f"Error saving settings: {e}")
+            return
+        self._remember_recent(filename)
+        self.logger.info(f"Settings saved to {filename}")
+        jobs = len(data["queue"])
+        message = ("Settings saved.\n\nThe file holds your search, "
+                   f"{jobs} queued job{'' if jobs == 1 else 's'}, the cities, and every option.")
+        if passwords_removed:
+            message += "\n\nPasswords are never saved. Enter the proxy and database passwords again after loading."
+        messagebox.showinfo("Settings saved", message)
 
     def load_settings(self):
-        """Load settings from file"""
-        filename = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+        """Ask for a settings file, then load it"""
+        if self.scraping:
+            messagebox.showinfo("Run in progress", "Stop the run first, then load the settings.")
+            return
+        filename = filedialog.askopenfilename(filetypes=[
+            ("AGMS settings", "*" + SETTINGS_EXTENSION), ("Older settings files", "*.txt"), ("All files", "*.*")])
         if filename:
+            self.load_settings_from(filename)
+
+    def load_settings_from(self, filename, quiet=False):
+        """Read, check and apply a settings file. The whole file is checked before anything changes, so a
+        bad file never leaves the form half loaded. quiet=True (the last session) shows no dialogs.
+        Returns True when the settings were applied."""
+        def fail(message):
+            if quiet:
+                self.logger.warning(f"Settings not loaded: {message}")
+            else:
+                self.logger.error(message)
+                messagebox.showerror("Cannot load settings", message)
+            return False
+
+        if self.scraping and not quiet:
+            messagebox.showinfo("Run in progress", "Stop the run first, then load the settings.")
+            return False
+        try:
+            if os.path.getsize(filename) > MAX_SETTINGS_BYTES:
+                return fail("This file is too big to be an AGMS settings file.")
+            with open(filename, "r", encoding="utf-8-sig", errors="replace") as f:
+                clean, notes = parse_settings_text(f.read())
+        except FileNotFoundError:
+            if not quiet:
+                self.prefs["recent"] = [p for p in self.prefs["recent"] if not same_file(p, filename)]
+                save_prefs(self.prefs)
+            return fail(f"The file was not found:\n{filename}")
+        except (OSError, ValueError) as e:
+            return fail(str(e))
+        try:
+            notes += self._apply_settings(clean)
+        except Exception as e:
+            return fail(f"Error loading settings: {e}")
+
+        if quiet:
+            for note in notes:
+                self.logger.warning(note)
+            return True
+        self._remember_recent(filename)
+        self.logger.info(f"Settings loaded from {filename}")
+        lines = ["Settings loaded."]
+        if "queue" in clean:
+            lines.append(f"{len(self.jobs)} job{'' if len(self.jobs) == 1 else 's'} in the queue.")
+        if clean.get("cities_text", "").strip():
+            count = len([c for c in clean["cities_text"].splitlines() if c.strip()])
+            lines.append(f"{count} cit{'y' if count == 1 else 'ies'} in the list.")
+        if notes:
+            lines += ["", "Notes:"] + [f"- {note}" for note in notes]
+            messagebox.showwarning("Settings loaded", "\n".join(lines))
+        else:
+            messagebox.showinfo("Settings loaded", "\n".join(lines))
+        return True
+
+    def _remember_recent(self, path):
+        path = os.path.abspath(path)
+        self.prefs["recent"] = ([path] + [p for p in self.prefs["recent"] if not same_file(p, path)])[:MAX_RECENT]
+        save_prefs(self.prefs)
+
+    def _fill_recent_menu(self):
+        menu = self.recent_menu
+        menu.delete(0, tk.END)
+        if not self.prefs["recent"]:
+            menu.add_command(label="(none yet)", state=tk.DISABLED)
+            return
+        for path in self.prefs["recent"]:
+            menu.add_command(label=path, command=lambda path=path: self.load_settings_from(path))
+
+    def _toggle_remember_session(self):
+        self.prefs["remember_session"] = bool(self.remember_var.get())
+        save_prefs(self.prefs)
+        if not self.prefs["remember_session"]:
             try:
-                loaded_jobs = []
-                with open(filename, 'r', encoding='utf-8', errors='replace') as f:
-                    for line in f:
-                        line = line.strip()
-                        # split(..., 1): values like a Postgres URL contain '=' themselves
-                        if not line or '=' not in line:
-                            continue
-                        key, value = line.split('=', 1)
-                        if key == "query":
-                            self.query_var.set(value)
-                        elif key == "output":
-                            self.output_var.set(value)
-                        elif key == "job":
-                            query, _, name = value.partition("\t")
-                            try:
-                                loaded_jobs.append(self._make_job(query, name, loaded_jobs))
-                            except ValueError as problem:
-                                self.logger.warning(f"Skipped a saved job: {problem}")
-                        elif key == "export_csv":
-                            self.export_csv_var.set(value.lower() == "true")
-                        elif key == "export_json":
-                            self.export_json_var.set(value.lower() == "true")
-                        elif key == "export_excel":
-                            self.export_excel_var.set(value.lower() == "true")
-                        elif key == "format":
-                            # Back-compat with settings files saved by older GUI versions
-                            self.export_csv_var.set(value in ("csv", "both"))
-                            self.export_json_var.set(value in ("json", "both"))
-                        elif key == "headless":
-                            self.headless_var.set(value.lower() == "true")
-                        elif key == "test":
-                            self.test_var.set(value.lower() == "true")
-                        elif key == "verbose":
-                            self.verbose_var.set(value.lower() == "true")
-                        elif key == "limit":
-                            self.limit_var.set(int(value))
-                        elif key == "delay":
-                            self.delay_var.set(int(value))
-                        elif key == "max_results":
-                            self.max_results_var.set(int(value))
-                        elif key == "workers":
-                            self.workers_var.set(int(value))
-                        elif key == "proxy":
-                            self.proxy_var.set(value)
-                        elif key == "schedule":
-                            self.schedule_var.set(value)
-                        elif key == "sqlite":
-                            self.sqlite_var.set(value)
-                        elif key == "postgres":
-                            self.postgres_var.set(value)
-                if loaded_jobs and not self.scraping:
-                    self.jobs[:] = loaded_jobs
-                    self.job_status[:] = ["Waiting"] * len(loaded_jobs)
-                    self._refresh_queue()
-                self.logger.info(f"Settings loaded from {filename}")
-                messagebox.showinfo("Success", "Settings loaded successfully!")
-            except Exception as e:
-                self.logger.error(f"Error loading settings: {e}")
-                messagebox.showerror("Error", f"Error loading settings: {e}")
+                os.remove(session_path())
+            except OSError:
+                pass
+
+    def _remember_session(self):
+        """Save the form when the window closes, so the next start picks up where this one stopped"""
+        if not self.prefs["remember_session"]:
+            return
+        try:
+            data, _ = self._settings_snapshot()
+            write_text_safely(session_path(), json.dumps(data, indent=2, ensure_ascii=False))
+        except Exception:
+            pass  # closing the window must never fail because of this
+
+    def _restore_session(self):
+        path = session_path()
+        if self.prefs["remember_session"] and os.path.exists(path):
+            if self.load_settings_from(path, quiet=True):
+                self.logger.info("Restored your last session. Clear Form starts fresh.")
 
     def clear_logs(self):
         """Clear log text"""
@@ -924,10 +1359,53 @@ class GoogleMapsScraperGUI:
         delay = self._read_int(self.delay_var, "Delay Between Cities", 0)
         workers = self._read_int(self.workers_var, "Parallel Workers", 1)
 
-        collected = self._collect_jobs()  # last, because it may ask a question
+        folder = self.folder_var.get().strip()
+        if folder:
+            folder = os.path.abspath(os.path.expanduser(folder))
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError as e:
+                raise ValueError(f"The folder in Save in folder cannot be used:\n{folder}\n\n{e.strerror or e}")
+        timestamp = self.timestamp_var.get()
+        schedule_mode = self.schedule_var.get()
+
+        collected = self._collect_jobs()  # asks a question when the query box still has text
         if collected is None:
             return None
         jobs, queued = collected
+
+        # Progress from an earlier run of the same job: continue, or start over. A job that continues replaces
+        # its own partial files, so it is left out of the existing-files question below.
+        used_cities = effective_cities(cities, self._read_int(self.limit_var, "Limit Cities", 0), self.test_var.get())
+        saved = []
+        for job in jobs:
+            key = job_key(job.query, used_cities, max_results, folder, job.output)
+            checkpoint = Checkpoint.load(key)
+            if checkpoint is not None and checkpoint.done:
+                saved.append((job, checkpoint))
+            elif checkpoint is not None:
+                checkpoint.delete()
+        resume = frozenset()
+        if saved:
+            choice = self._ask_resume([(job, len(checkpoint.done)) for job, checkpoint in saved], len(used_cities))
+            if choice is None:
+                return None
+            if choice == "resume":
+                resume = frozenset(checkpoint.key for _, checkpoint in saved)
+            else:
+                for _, checkpoint in saved:
+                    checkpoint.delete()
+        resumed_outputs = {job.output for job, checkpoint in saved if checkpoint.key in resume}
+
+        # Files that already exist. With the date and time in every name a clash is not expected, and the
+        # numbering rule still protects older files if one happens.
+        on_existing = "number"
+        clashes = [] if timestamp else [path for job in jobs if job.output not in resumed_outputs
+                                        for path in existing_files(folder, job.output, formats)]
+        if clashes:
+            on_existing = self._ask_existing_files(clashes, allow_skip=len(jobs) > 1 and schedule_mode == "None")
+            if on_existing is None:
+                return None
 
         return ScrapeSettings(
             jobs=jobs,
@@ -944,8 +1422,98 @@ class GoogleMapsScraperGUI:
             delay=delay,
             workers=workers,
             proxy=self.proxy_var.get().strip(),
-            schedule_mode=self.schedule_var.get(),
+            schedule_mode=schedule_mode,
+            folder=folder,
+            timestamp=timestamp,
+            on_existing=on_existing,
+            resume=resume,
         )
+
+    def _ask_choice(self, title, heading, items, note, options):
+        """A small modal question: a heading, a list of items, an optional note, and one button per option.
+        options is a list of (button text, value, explanation). Cancel is always added and returns None."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        answer = {"value": None}
+
+        def choose(value):
+            answer["value"] = value
+            dialog.destroy()
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=heading, font=("Segoe UI", 10, "bold"), wraplength=self._px(560), justify=tk.LEFT).pack(anchor=tk.W)
+
+        listing = ttk.Frame(body)
+        listing.pack(fill=tk.X, pady=(6, 12))
+        box = tk.Listbox(listing, height=min(6, len(items)), width=62, activestyle="none")
+        for item in items:
+            box.insert(tk.END, item)
+        box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if len(items) > 6:
+            bar = ttk.Scrollbar(listing, orient=tk.VERTICAL, command=box.yview)
+            bar.pack(side=tk.LEFT, fill=tk.Y)
+            box.config(yscrollcommand=bar.set)
+
+        if note:
+            ttk.Label(body, text=note, foreground="#666666", wraplength=self._px(560), justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Label(body, text="What should AGMS do?", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, pady=(12, 6))
+
+        grid = ttk.Frame(body)
+        grid.pack(fill=tk.X)
+        first = None
+        for row, (label, value, text) in enumerate(options):
+            button = ttk.Button(grid, text=label, width=16, command=lambda value=value: choose(value))
+            button.grid(row=row, column=0, sticky=tk.W, pady=3)
+            ttk.Label(grid, text=text, wraplength=self._px(380), justify=tk.LEFT).grid(row=row, column=1, sticky=tk.W, padx=(12, 0))
+            first = first or button
+        ttk.Button(body, text="Cancel", width=16, command=lambda: choose(None)).pack(anchor=tk.W, pady=(10, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+        dialog.bind("<Escape>", lambda event: choose(None))
+        dialog.update_idletasks()
+        self._place_window(dialog, dialog.winfo_reqwidth(), dialog.winfo_reqheight())
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass  # some window managers refuse a grab until the window is shown: the dialog still works
+        first.focus_set()
+        dialog.wait_window()
+        return answer["value"]
+
+    def _ask_existing_files(self, files, allow_skip):
+        """Tell the user which result files already exist and ask what to do.
+        Returns 'number' (keep both), 'overwrite' or 'skip', or None when the user cancels."""
+        count = len(files)
+        options = [("Keep both", "number", "Save the new results with a number, like hotels_2.csv, so nothing is replaced."),
+                   ("Replace", "overwrite", "Overwrite the old files with the new results.")]
+        if allow_skip:
+            options.append(("Skip those jobs", "skip", "Run only the jobs that have no files yet. This finishes an interrupted queue."))
+        return self._ask_choice(
+            "Files already exist",
+            "1 result file already exists:" if count == 1 else f"{count} result files already exist:",
+            [os.path.basename(path) for path in files],
+            f"Folder: {os.path.dirname(os.path.abspath(files[0]))}",
+            options)
+
+    def _ask_resume(self, saved, total_cities):
+        """Offer to continue jobs that an earlier run left unfinished. saved is a list of (job, finished cities).
+        Returns 'resume', 'restart', or None when the user cancels."""
+        items = []
+        for job, finished in saved:
+            left = total_cities - finished
+            items.append(f"{job.query}: {finished} of {total_cities} cities finished"
+                         + (f", {left} left" if left > 0 else ", only saving is left"))
+        count = len(saved)
+        return self._ask_choice(
+            "Continue an unfinished job?",
+            "An earlier run of this job did not finish:" if count == 1 else f"Earlier runs of {count} jobs did not finish:",
+            items,
+            "AGMS kept the cities that were scraped to the end. A city that was cut short is scraped again.",
+            [("Continue", "resume", "Scrape only the cities that are left, then save everything together."),
+             ("Start over", "restart", "Forget the saved progress and scrape every city again.")])
 
     def start_scraping(self):
         """Validate the options, then scrape in a separate thread"""
@@ -1008,9 +1576,15 @@ class GoogleMapsScraperGUI:
         """Run the whole queue immediately, then again on the chosen interval until Stop is pressed"""
         scheduler = schedule.Scheduler()  # dedicated instance: avoids leaking jobs into schedule's global state
 
+        first_run = True
+
         def job():
+            nonlocal first_run
+            # Only the first run can continue saved progress. A repeat is a fresh run that refreshes the data.
+            run_settings = settings if first_run else replace(settings, resume=frozenset())
+            first_run = False
             try:
-                self.run_queue(Scraper, cities, settings, notify=False)
+                self.run_queue(Scraper, cities, run_settings, notify=False)
             except Exception as e:
                 self.logger.error(f"Scheduled run failed, will retry on the next cycle: {e}")
             if self.scraping:
@@ -1051,7 +1625,6 @@ class GoogleMapsScraperGUI:
                 self._job_label = f"Job {number}/{total}: " if total > 1 else ""
                 if total > 1:
                     self.logger.info(f"Job {number} of {total}: {job.query}")
-                self.logger.info(f"Results for '{job.query}' are saved as: {job.output}")
                 self._set_job_status_safe(settings, number - 1, "Running")
                 try:
                     result = self.execute_job(Scraper, cities, settings, job)
@@ -1070,6 +1643,8 @@ class GoogleMapsScraperGUI:
 
     @staticmethod
     def _status_text(result):
+        if result.skipped:
+            return "Skipped (exists)"
         if result.cancelled:
             return f"Stopped ({result.found})"
         if result.failed_exports:
@@ -1088,9 +1663,15 @@ class GoogleMapsScraperGUI:
             if not results:
                 return
             result = results[0]
-            if notify and result.found:
+            if notify and result.skipped:
+                self._show_dialog_safe("showinfo", "Nothing to do", f"{result.text}.")
+            elif notify and result.found:
                 kind, title = ("showwarning", "Warning") if result.failed_exports else ("showinfo", "Success")
-                self._show_dialog_safe(kind, title, f"{result.text}\nTotal: {result.found} companies found")
+                message = f"{result.text}\nTotal: {result.found} companies found"
+                if settings.formats:
+                    where = os.path.dirname(os.path.abspath(os.path.join(settings.folder, result.saved_as)))
+                    message += f"\nSaved as {result.saved_as} in {where}"
+                self._show_dialog_safe(kind, title, message)
             elif notify:
                 self._show_dialog_safe("showwarning", "Warning", "No results found")
             return
@@ -1099,11 +1680,14 @@ class GoogleMapsScraperGUI:
         failed = [job for job, result in outcomes if result is None]
         export_failures = sorted({name for result in results for name in result.failed_exports})
         skipped = total - len(outcomes)
+        already_there = [result for result in results if result.skipped]
 
         if stopped:
             headline = f"Stopped after {len(outcomes)} of {total} jobs. Partial results were saved."
         else:
             headline = f"Finished {len(outcomes)} of {total} jobs."
+        if already_there:
+            headline += f" {len(already_there)} had files already and {'was' if len(already_there) == 1 else 'were'} skipped."
         if failed:
             headline += f" {len(failed)} failed."
         if export_failures:
@@ -1113,12 +1697,16 @@ class GoogleMapsScraperGUI:
         for job, result in outcomes:
             if result is None:
                 lines.append(f"{job.query}: failed")
+            elif result.skipped:
+                lines.append(f"{job.query}: skipped, {result.saved_as} already exists")
             elif result.found == 0:
                 lines.append(f"{job.query}: no results")
             else:
-                lines.append(f"{job.query}: {result.found} companies, saved as {job.output}")
+                lines.append(f"{job.query}: {result.found} companies, saved as {result.saved_as or job.output}")
         if skipped:
             lines.append(f"{skipped} job was skipped." if skipped == 1 else f"{skipped} jobs were skipped.")
+        if settings.formats and any(result.found for result in results):
+            lines.append(f"Folder: {os.path.abspath(settings.folder or '.')}")
 
         problems = bool(stopped or failed or export_failures)
         icon = "⏹" if stopped else "⚠️" if problems else "✅"
@@ -1129,15 +1717,60 @@ class GoogleMapsScraperGUI:
                                    headline + "\n\n" + "\n".join(lines))
 
     def execute_job(self, Scraper, cities, settings, job):
-        """Scrape all cities for one job (single- or multi-threaded) and export its results.
+        """Scrape the cities of one job (single- or multi-threaded) and export its results. Cities that an
+        earlier, interrupted run finished are taken from its saved progress instead of being scraped again.
         Returns a JobResult."""
         total_cities = len(cities)
-        all_results = []
+        key = job_key(job.query, cities, settings.max_results, settings.folder, job.output)
+        checkpoint = Checkpoint.load(key) if key in settings.resume else None
+        resumed = checkpoint is not None
+        if resumed:
+            # The same file name as the first attempt, so the partial files that attempt left are replaced
+            name = planned = checkpoint.name or job.output
+            self.logger.info(f"Resuming '{job.query}': {len(checkpoint.done)} of {total_cities} cities were already "
+                             f"finished. Results will be saved as {name}")
+        else:
+            Checkpoint.discard(key)  # progress the user chose not to continue must not leak into this run
+            checkpoint = Checkpoint(key, job.query, cities)
+            name = f"{job.output}_{time.strftime('%Y-%m-%d_%H-%M')}" if settings.timestamp else job.output
+            planned = pick_output_name(settings.folder, name, settings.formats, settings.on_existing)
+            if planned is None:
+                text = f"Skipped '{job.query}': {name} already exists"
+                self._set_status_safe(f"{self._job_label}⏭ {text}")
+                self.logger.info(f"⏭ {text}")
+                return JobResult(job=job, found=0, failed_exports=(), cancelled=False, icon="⏭", text=text,
+                                 skipped=True, saved_as=name)
+            where = os.path.dirname(os.path.abspath(os.path.join(settings.folder, name)))
+            if planned != name:
+                self.logger.warning(f"{name} already exists, so '{job.query}' will be saved as {planned}")
+            elif existing_files(settings.folder, name, settings.formats):
+                self.logger.warning(f"Replacing the existing files named {name}")
+            else:
+                self.logger.info(f"Results for '{job.query}' will be saved as {name} in {where}")
+            checkpoint.name = planned
+
+        all_results = checkpoint.results(cities)
+        todo = [city for city in cities if city not in checkpoint.done]
+        already = total_cities - len(todo)
+        order = {city: position for position, city in enumerate(cities)}
         proxy = settings.proxy or None
         query, headless, delay, workers = job.query, settings.headless, settings.delay, settings.workers
         max_results = settings.max_results or None
+        warned = False
 
-        if workers > 1:
+        def city_finished(city, businesses):
+            """Keep a city that was scraped to the end. One that Stop cut short is not kept, so a resume does it again."""
+            nonlocal warned
+            if not self.scraping:
+                return
+            checkpoint.mark_done(city, businesses)
+            if not checkpoint.save() and not warned:
+                warned = True
+                self.logger.warning("Progress could not be saved, so this job cannot be continued if it is interrupted.")
+
+        if not todo:
+            self.logger.info("Every city was already finished, so only saving is left.")
+        elif workers > 1:
             self.logger.info(f"🚀 Starting multi-threaded mode with {workers} concurrent browsers...")
 
             def scrape_one_city(city, pre_delay):
@@ -1152,9 +1785,9 @@ class GoogleMapsScraperGUI:
                 finally:
                     self._close_scraper(worker_scraper)
 
-            completed = 0
+            completed = already
             submitted = 0
-            cities_iter = iter(cities)
+            cities_iter = iter(todo)
             pending = {}
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1167,7 +1800,7 @@ class GoogleMapsScraperGUI:
                         pending[executor.submit(scrape_one_city, city, pre_delay)] = city
                         submitted += 1
 
-                for _ in range(min(workers, total_cities)):
+                for _ in range(min(workers, len(todo))):
                     if not self.scraping:
                         break
                     submit_next()
@@ -1180,6 +1813,7 @@ class GoogleMapsScraperGUI:
                             businesses = future.result()
                             if businesses is not None:
                                 all_results.extend(businesses)
+                                city_finished(city, businesses)
                                 self.logger.info(f"Found {len(businesses)} businesses in {city}")
                         except Exception as e:
                             self.logger.error(f"Error processing city {city}: {e}")
@@ -1194,39 +1828,51 @@ class GoogleMapsScraperGUI:
         else:
             scraper = self._open_scraper(Scraper, headless, proxy)
             try:
-                for i, city in enumerate(cities, 1):
+                for i, city in enumerate(todo, 1):
                     if not self.scraping:
                         break
 
-                    progress = (i - 1) / total_cities * 100
-                    self._update_progress_safe(progress, f"Processing city {i}/{total_cities}: {city}")
-                    self.logger.info(f"Processing city {i}/{total_cities}: {city}")
+                    number = already + i
+                    progress = (number - 1) / total_cities * 100
+                    self._update_progress_safe(progress, f"Processing city {number}/{total_cities}: {city}")
+                    self.logger.info(f"Processing city {number}/{total_cities}: {city}")
 
                     try:
                         businesses = scraper.search_google_maps(query, city, max_results)
                         for business in businesses:
                             business['city'] = city
                         all_results.extend(businesses)
+                        city_finished(city, businesses)
                         self.logger.info(f"Found {len(businesses)} businesses in {city}")
 
-                        if i < total_cities:
+                        if i < len(todo):
                             scraper.pause(Scraper.jittered_delay(delay))
                     except Exception as e:
                         self.logger.error(f"Error processing city {city}: {e}")
             finally:
                 self._close_scraper(scraper)
 
+        all_results.sort(key=lambda business: order.get(business.get('city'), total_cities))  # city order, however they finished
         cancelled = not self.scraping
         if cancelled:
             self.logger.info("Scraping cancelled by user")
+        complete = all(city in checkpoint.done for city in cities)
 
         failed_exports = ()
+        final_name = planned
         if all_results:
             self._update_progress_safe(100, "Saving results...")
             self.logger.info("Saving results...")
-            failed_exports = tuple(self.save_results(Scraper, all_results, settings, job))
+            if not resumed:
+                # The scrape can take hours, so look again: a file may have appeared meanwhile. Skipping is only
+                # right before a job starts, never when results are already in hand, so it becomes numbering here.
+                policy = "number" if settings.on_existing == "skip" else settings.on_existing
+                final_name = pick_output_name(settings.folder, name, settings.formats, policy)
+                if final_name != planned:
+                    self.logger.warning(f"{planned} was created while this job ran, so the results are saved as {final_name}")
+            failed_exports = tuple(self.save_results(Scraper, all_results, settings, job, final_name, checkpoint))
             self.display_statistics(all_results)
-            icon, done_text = ("⏹", "Scraping stopped. Partial results were saved.") if cancelled \
+            icon, done_text = ("⏹", "Scraping stopped. Partial results were saved.") if cancelled and not complete \
                 else ("✅", "Scraping completed successfully!")
             if failed_exports:
                 icon, done_text = "⚠️", f"Scraping finished, but these exports failed: {', '.join(failed_exports)}. See the log."
@@ -1237,16 +1883,56 @@ class GoogleMapsScraperGUI:
             self._set_status_safe(f"{self._job_label}{icon} {done_text}")
             self.logger.warning(done_text)
 
-        return JobResult(job=job, found=len(all_results), failed_exports=failed_exports,
-                         cancelled=cancelled, icon=icon, text=done_text)
+        if complete and not failed_exports:
+            checkpoint.delete()  # nothing is left to continue
+        elif checkpoint.done:
+            checkpoint.save()
+            finished = f"{len(checkpoint.done)} of {total_cities} cities are finished and saved."
+            if failed_exports and complete:
+                self.logger.info(f"The scraping is complete. Run this job again and choose Continue to save without scraping. {finished}")
+            elif cancelled:
+                self.logger.info(f"Progress kept: {finished} Run this job again and choose Continue to carry on.")
+            else:
+                self.logger.warning(f"Some cities failed. {finished} Run this job again and choose Continue to retry only the rest.")
 
-    def save_results(self, Scraper, all_results, settings, job):
+        return JobResult(job=job, found=len(all_results), failed_exports=failed_exports,
+                         cancelled=cancelled and not complete, icon=icon, text=done_text, saved_as=final_name)
+
+    def save_results(self, Scraper, all_results, settings, job, name=None, checkpoint=None):
         """Export through the shared Scraper class, so CSV/JSON/Excel/SQLite/Postgres
         all use the same field set (including city/hours/image) as the CLI.
+        `name` is the file name chosen for this run (job.output by default). With a checkpoint, a database receives
+        each finished city only once, however many runs it took to finish the job. Database rows carry the search.
         Returns the names of any exports that failed."""
-        exporter = Scraper.for_export(all_results)
-        return exporter.export_all(job.output, settings.formats,
-                                   settings.sqlite_db or None, settings.postgres_conn or None)
+        base = os.path.join(settings.folder, name or job.output)
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(base)), exist_ok=True)  # a typed path may name a new folder
+        except OSError as e:
+            self.logger.error(f"Could not create the folder for {base}: {e}")  # the export below then reports it
+        sqlite_db = settings.sqlite_db or None
+        postgres = settings.postgres_conn or None
+        if checkpoint is None:
+            return Scraper.for_export(all_results).export_all(base, settings.formats, sqlite_db, postgres, search=job.query)
+
+        targets = [(label, value) for label, value in (("SQLite", sqlite_db), ("PostgreSQL", postgres)) if value]
+        pending = {label: [city for city in checkpoint.done if city not in set(checkpoint.exported.get(label, []))]
+                   for label, _ in targets}
+        finished_rows = sum(len(rows) for rows in checkpoint.done.values())
+        if len(all_results) == finished_rows and all(set(cities) == set(checkpoint.done) for cities in pending.values()):
+            # The usual case: every database gets everything, in the same call as the files
+            failed = list(Scraper.for_export(all_results).export_all(base, settings.formats, sqlite_db, postgres, search=job.query))
+        else:
+            # Resumed or stopped: files get everything found, each database only the finished cities it has not seen
+            failed = list(Scraper.for_export(all_results).export_all(base, settings.formats)) if settings.formats else []
+            for label, value in targets:
+                rows = [business for city in checkpoint.done if city in pending[label] for business in checkpoint.done[city]]
+                if rows:
+                    where = {"sqlite_db": value} if label == "SQLite" else {"postgres_conn": value}
+                    failed += Scraper.for_export(rows).export_all(base, (), search=job.query, **where)
+        for label, _ in targets:
+            if label not in failed:
+                checkpoint.exported[label] = sorted(set(checkpoint.exported.get(label, [])) | set(pending[label]))
+        return failed
 
     def _open_scraper(self, Scraper, headless, proxy):
         """Start a browser and register it, so closing the window can shut down any that are still open"""
@@ -1273,11 +1959,13 @@ class GoogleMapsScraperGUI:
     def on_close(self):
         """Window close: stop any running job and shut its browsers down before exiting"""
         if self.worker_thread is None or not self.worker_thread.is_alive():
+            self._remember_session()
             self.root.destroy()
             return
         if not messagebox.askyesno("Quit", "A scrape is still running. Stop it and exit?"):
             return
         self.stop_scraping()
+        self._remember_session()
         self.status_var.set("Closing browsers...")
         self._close_deadline = time.monotonic() + 30
         self._finish_close()
@@ -1365,6 +2053,11 @@ class GoogleMapsScraperGUI:
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="Save Settings...", command=self.save_settings)
         file_menu.add_command(label="Load Settings...", command=self.load_settings)
+        self.recent_menu = tk.Menu(file_menu, tearoff=False, postcommand=self._fill_recent_menu)
+        file_menu.add_cascade(label="Recent Settings", menu=self.recent_menu)
+        self.remember_var = tk.BooleanVar(value=self.prefs["remember_session"])
+        file_menu.add_checkbutton(label="Remember Last Session", variable=self.remember_var,
+                                  command=self._toggle_remember_session)
         file_menu.add_separator()
         file_menu.add_command(label="Open Results Folder", command=self.open_results_folder)
         file_menu.add_separator()
@@ -1380,11 +2073,21 @@ class GoogleMapsScraperGUI:
         self.root.config(menu=menubar)
         self.root.bind("<F1>", lambda event: self.show_help())
 
+    def _results_folder(self):
+        """The folder result files go to: the Save in folder box, or the current folder when it is empty"""
+        folder = self.folder_var.get().strip()
+        return os.path.abspath(os.path.expanduser(folder)) if folder else os.getcwd()
+
     def open_results_folder(self):
+        folder = self._results_folder()
+        if not os.path.isdir(folder):
+            messagebox.showinfo("Folder not found",
+                                f"The folder does not exist yet:\n{folder}\n\nIt is created when the first results are saved.")
+            return
         try:
-            os.startfile(os.getcwd())
+            os.startfile(folder)
         except (AttributeError, OSError) as e:
-            messagebox.showerror("Error", f"Could not open the folder {os.getcwd()}: {e}")
+            messagebox.showerror("Error", f"Could not open the folder {folder}: {e}")
 
     def _place_window(self, window, width, height):
         """Size a pop-up window and centre it over the main window"""
@@ -1482,11 +2185,12 @@ class GoogleMapsScraperGUI:
         folder = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else APP_DIR
         return "\n".join([
             f"AGMS version: {__version__}",
+            f"Publisher: {PUBLISHER}",
             f"Python: {platform.python_version()}   Tk: {self.root.tk.call('info', 'patchlevel')}",
             f"System: {platform.platform()}",
             f"Running as: {'installed app' if getattr(sys, 'frozen', False) else 'Python script'}",
             f"Program folder: {folder}",
-            f"Results folder: {os.getcwd()}",
+            f"Results folder: {self._results_folder()}",
         ])
 
     def show_about(self):
@@ -1494,7 +2198,7 @@ class GoogleMapsScraperGUI:
         window.title("About AGMS")
         window.resizable(False, False)
         window.transient(self.root)
-        self._place_window(window, self._px(500), self._px(430))
+        self._place_window(window, self._px(500), self._px(460))
         window.bind("<Escape>", lambda event: window.destroy())
 
         header = tk.Frame(window, bg=COLOR_PRIMARY)
@@ -1524,12 +2228,13 @@ class GoogleMapsScraperGUI:
                 value_label = ttk.Label(facts, text=value, wraplength=self._px(330), justify=tk.LEFT)
             value_label.grid(row=row, column=1, sticky="w", pady=2)
 
-        add_fact(0, "Made by", "Pashalis Laoutaris")
-        add_fact(1, "License", "MIT License")
-        add_fact(2, "Project page", "github.com/powergr/AGMS", "https://github.com/powergr/AGMS")
-        add_fact(3, "Report a problem", "github.com/powergr/AGMS/issues", "https://github.com/powergr/AGMS/issues")
-        add_fact(4, "Python", f"{platform.python_version()}  (Tk {self.root.tk.call('info', 'patchlevel')})")
-        add_fact(5, "Results folder", os.getcwd())
+        add_fact(0, "Publisher", PUBLISHER)
+        add_fact(1, "Copyright", COPYRIGHT.replace("Copyright (c)", "©"))
+        add_fact(2, "License", "MIT License")
+        add_fact(3, "Project page", "github.com/powergr/AGMS", "https://github.com/powergr/AGMS")
+        add_fact(4, "Report a problem", "github.com/powergr/AGMS/issues", "https://github.com/powergr/AGMS/issues")
+        add_fact(5, "Python", f"{platform.python_version()}  (Tk {self.root.tk.call('info', 'patchlevel')})")
+        add_fact(6, "Results folder", self._results_folder())
 
         buttons = ttk.Frame(body)
         buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(16, 0))
@@ -1604,16 +2309,34 @@ HELP_SECTIONS = [
         ("bullets", [
             "**CSV, JSON and Excel:** tick any mix of these. Each job writes its own files, named after its "
             "Save as name, for example hotels.csv and hotels.xlsx.",
-            "**Saving somewhere else:** type a full path in Save as, such as C:\\Data\\hotels, and the files "
-            "go to that folder.",
+            "**Save in folder:** the folder for your files. Press Browse to pick one. AGMS creates it if it does "
+            "not exist. Leave it empty to use the default results folder.",
+            "**A full path in Save as** such as C:\\Data\\hotels overrides the folder for that one job.",
+            "**Add the date and time to file names:** hotels becomes hotels_2026-11-15_14-30. Every run then "
+            "keeps its own files, which suits a repeat schedule.",
             "**SQLite file:** also saves every business into a database file. Press Browse to pick or create one.",
             "**PostgreSQL connection string:** also saves into a PostgreSQL server. Use the form "
             "postgresql://user:password@host/database.",
+            "**Database rows carry the search.** Each row has a search column with the query that found it, so "
+            "searches that share one table can be told apart. CSV, JSON and Excel files keep their usual columns.",
             "**Databases keep adding rows.** Running the same search again adds the same businesses a second "
-            "time, and every job writes into the same table.",
+            "time. Within one job, a city is added only once, even when the job takes several runs to finish.",
+            "A database table made by an older version gets the search column added on the next save. Its old "
+            "rows keep that column empty.",
             "**Passwords are never saved** in a settings file. Type them again after loading.",
             "If one file type fails to save, for example because the CSV is open in Excel, the other types are "
             "still saved and AGMS tells you which one failed.",
+        ]),
+        ("para", "**When files already exist.** AGMS never replaces your earlier results without asking. When you "
+                 "press Start and a CSV, JSON or Excel file with the same name is already in the folder, a window "
+                 "lists those files and asks what to do."),
+        ("bullets", [
+            "**Keep both:** saves the new results with a number, such as hotels_2.csv, so nothing is replaced.",
+            "**Replace:** overwrites the old files with the new results.",
+            "**Skip those jobs:** runs only the jobs that have no files yet. Use it to finish a queue that was "
+            "interrupted. This choice appears when the queue has more than one job and no schedule is set.",
+            "**Cancel:** goes back without running anything.",
+            "A file that appears while a long job runs is also protected. The new results are saved with a number.",
         ]),
         ("para", "Each business is one row with these columns: id, name, description, rating, reviewCount, phone, "
                  "email, website, address, hours, image, verified, tags, and city."),
@@ -1639,6 +2362,29 @@ HELP_SECTIONS = [
             "**Repeat Schedule:** runs the queue again and again. See the next section.",
         ]),
     ]),
+    ("Stopping and continuing", [
+        ("para", "A long job can be interrupted. You may press Stop, close the window, lose power, or hit an error. "
+                 "AGMS saves its progress after every city, so the cities already finished are not lost."),
+        ("steps", [
+            "Press Start on the same job again. It must have the same query, the same cities, the same Max "
+            "Results, the same folder, and the same Save as name.",
+            "A window shows how many cities were finished, for example 12 of 40.",
+            "Choose **Continue** to scrape only the cities that are left. AGMS then saves everything together, "
+            "in city order, and replaces the partial files from the interrupted run.",
+            "Choose **Start over** to forget the progress and scrape every city again.",
+        ]),
+        ("bullets", [
+            "A city that Stop cut short is not counted as finished, so it is scraped again in full.",
+            "A city that failed, for example because the page did not load, is kept out of the finished list. "
+            "Run the job again and Continue retries only those cities.",
+            "If only the saving failed, for example because a CSV was open in Excel, Continue saves without "
+            "scraping anything. The window then says only saving is left.",
+            "Databases receive each finished city once, so continuing never adds the same city twice.",
+            "Progress files are kept in your user profile folder and deleted when the job finishes. Files older "
+            "than 30 days are removed automatically.",
+            "Scheduled repeats always start fresh. Only the first run of a schedule can continue earlier progress.",
+        ]),
+    ]),
     ("Repeating on a schedule", [
         ("para", "Choose daily, hourly, or weekly. AGMS runs the whole queue straight away, then waits and runs it "
                  "again at the next time. Daily runs happen at midnight."),
@@ -1647,18 +2393,42 @@ HELP_SECTIONS = [
             "Your settings are read when you press Start. To change them, press Stop and start again.",
             "A run that fails is logged, and the next one still happens.",
             "Scheduled runs show no pop-up dialogs. Check the log and the status bar instead.",
-            "CSV, JSON and Excel files with the same name are replaced on every run. Databases keep adding rows.",
+            "If files with the same name already exist, you choose once at the start. Keep both saves each later "
+            "run with a number. Replace overwrites on every run. Tick the date and time option to give every run "
+            "its own names. Databases keep adding rows.",
         ]),
+    ]),
+    ("Saving your settings", [
+        ("para", "Save Settings writes everything on the screen into one file: the search query, the queue, "
+                 "the cities, the folder, the file types, the database boxes, and every scraping option. "
+                 "Load Settings puts it all back, so a favorite setup is two clicks away."),
+        ("bullets", [
+            "**Save Settings** asks for a file name. The file ends in .agms and is plain text you can open in "
+            "Notepad.",
+            "**Load Settings** checks the whole file first. A damaged file, or a results file picked by mistake, "
+            "gives a clear message and changes nothing.",
+            "If a few values in a file are wrong, the good ones are loaded and a message lists what was ignored.",
+            "**File, Recent Settings** lists the last files you saved or loaded, so you can open one with a click.",
+            "**File, Remember Last Session** is on by default. AGMS saves your screen when you close it and "
+            "restores it on the next start. Switch it off to always start fresh. Clear Form also starts fresh.",
+            "**Passwords are never saved**, in a settings file or in the remembered session. Type the proxy and "
+            "database passwords again when you need them.",
+            "Settings files from older versions still load. They hold no cities, so your cities stay as they are.",
+            "Loading is not possible while a run is in progress, so press Stop first.",
+        ]),
+        ("note", "Your remembered session and recent files live in your user profile folder, "
+                 "not in the results folder."),
     ]),
     ("Buttons, menus and the log", [
         ("bullets", [
             "**Start Scraping** runs the queue, or the single query in the box when the queue is empty.",
             "**Stop** ends the run within a moment, even in the middle of a big city. The businesses found so far "
-            "are saved, and jobs that had not started are marked Skipped.",
+            "are saved, and jobs that had not started are marked Skipped. You can continue the job later.",
             "**Clear Form** puts every box back to its starting value and empties the queue.",
-            "**Save Settings** and **Load Settings** keep your options and your queue in a text file.",
+            "**Save Settings** and **Load Settings** keep your whole screen in a file. See the section above.",
             "**Clear Logs**, **Copy Logs** and **Save Logs** work on the log panel at the bottom.",
-            "**File menu:** Save Settings, Load Settings, Open Results Folder, and Exit.",
+            "**File menu:** Save Settings, Load Settings, Recent Settings, Remember Last Session, Open Results "
+            "Folder, and Exit.",
             "**Help menu:** this guide, and the About window with version details you can copy.",
             "In the log, red lines are errors, orange lines are warnings, black lines are progress, and gray "
             "lines are extra detail from Verbose Logging.",
@@ -1684,8 +2454,13 @@ HELP_SECTIONS = [
             "**Timeouts or a captcha:** raise the delay, lower the number of workers, or try again later.",
             "**A file did not save:** it is probably open in Excel. Close it and run again. Your other file types "
             "were saved.",
-            "**Cannot find your files:** choose File, Open Results Folder.",
+            "**Cannot find your files:** choose File, Open Results Folder. It opens the folder named in Save in "
+            "folder, or the default results folder.",
+            "**Your last search is already on screen at start-up:** that is Remember Last Session. Turn it off in "
+            "the File menu, or press Clear Form.",
             "**A job says Failed:** read the red lines in the log just above. The jobs after it still ran.",
+            "**A window asks about an unfinished job:** that is saved progress from an interrupted run. See "
+            "Stopping and continuing.",
         ]),
     ]),
     ("Good to know", [
@@ -1751,12 +2526,39 @@ def run_self_test():
         with tempfile.TemporaryDirectory() as folder:
             base = os.path.join(folder, "selftest")
             database = os.path.join(folder, "selftest.db")
-            broken = GoogleMapsScraper.for_export(sample).export_all(base, ["csv", "json", "excel"], sqlite_db=database)
+            broken = GoogleMapsScraper.for_export(sample).export_all(base, ["csv", "json", "excel"], sqlite_db=database,
+                                                                     search="self test")
             if broken:
                 raise RuntimeError(f"these exports failed: {', '.join(broken)}")
             for path in (base + ".csv", base + ".json", base + ".xlsx", database):
                 if not os.path.exists(path):
                     raise FileNotFoundError(path)
+            import sqlite3
+            connection = sqlite3.connect(database)
+            try:
+                stored = connection.execute("SELECT search FROM businesses").fetchall()
+            finally:
+                connection.close()
+            if stored != [("self test",)]:
+                raise RuntimeError(f"the database rows did not carry the search: {stored}")
+
+    def progress_files_work():
+        checkpoint = Checkpoint("selftest0000000000000000", "q", ["a", "b"])
+        checkpoint.mark_done("a", [{"company": "x", "city": "a"}])
+        previous = os.environ.get("AGMS_CONFIG_DIR")
+        with tempfile.TemporaryDirectory() as folder:
+            os.environ["AGMS_CONFIG_DIR"] = folder  # a throwaway folder, so the test never touches real progress
+            try:
+                if not checkpoint.save():
+                    raise RuntimeError("the progress file could not be written")
+                loaded = Checkpoint.load(checkpoint.key)
+                if loaded is None or list(loaded.done) != ["a"]:
+                    raise RuntimeError("the progress file did not load back")
+            finally:
+                if previous is None:
+                    os.environ.pop("AGMS_CONFIG_DIR", None)
+                else:
+                    os.environ["AGMS_CONFIG_DIR"] = previous
 
     def chrome_classes_resolve():
         from selenium import webdriver
@@ -1794,6 +2596,7 @@ def run_self_test():
     step("PostgreSQL driver loads", postgres_driver_loads)
     step("Chrome driver classes load", chrome_classes_resolve)
     step("CSV, JSON, Excel and SQLite exports work", every_export_format_works)
+    step("Progress files for resuming work", progress_files_work)
     step("HTML parsing and email choice work", parse_html_and_pick_email)
     if "--online" in sys.argv[1:]:
         step("HTTPS requests work", https_works)

@@ -8,6 +8,7 @@
 
 #define AppName "Another Google Maps Scraper (AGMS)"
 #define AppExe "AGMS.exe"
+#define Publisher "Pashalis Laoutaris"
 
 [Setup]
 ; Never change this ID. It is how a newer setup file recognises and upgrades an existing install.
@@ -15,7 +16,15 @@ AppId={{042320B2-9C45-41AB-9D9E-D3BB2E335834}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher=Pashalis Laoutaris
+; The publisher shows in the wizard, in Apps, Installed apps, and in the setup file's own properties.
+AppPublisher={#Publisher}
+AppCopyright=Copyright (c) 2025 {#Publisher}
+VersionInfoCompany={#Publisher}
+VersionInfoCopyright=Copyright (c) 2025 {#Publisher}. MIT License.
+VersionInfoDescription={#AppName} Setup
+VersionInfoProductName={#AppName}
+; The file version needs four numbers, so AppVersion must be plain numbers such as 1.3.4.
+VersionInfoVersion={#AppVersion}.0
 AppPublisherURL=https://github.com/powergr/AGMS
 AppSupportURL=https://github.com/powergr/AGMS/issues
 AppUpdatesURL=https://github.com/powergr/AGMS/releases

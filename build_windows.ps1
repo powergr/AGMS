@@ -37,9 +37,22 @@ if ($VersionOnly) {
 Write-Host "Building AGMS $version"
 
 $icon = (Resolve-Path "icon.ico").Path
+
+# The file properties of AGMS.exe (publisher, copyright, version), made from a template so they follow __version__
+$publisher = "Pashalis Laoutaris"
+$numbers = @([regex]::Matches($version, '\d+') | ForEach-Object { [int]$_.Value } | Select-Object -First 4)
+while ($numbers.Count -lt 4) { $numbers += 0 }
+$versionFile = Join-Path $PSScriptRoot "build\version_info.txt"
+New-Item -ItemType Directory -Force (Split-Path $versionFile) | Out-Null
+$template = Get-Content (Join-Path $PSScriptRoot "installer\version_info.template.txt") -Raw -Encoding UTF8
+$filled = $template.Replace("{{VERSION}}", $version).Replace("{{FILEVERS}}", ($numbers -join ", "))
+# No byte order mark: PyInstaller reads this file as Python code, and a mark would be a syntax error
+[System.IO.File]::WriteAllText($versionFile, $filled, (New-Object System.Text.UTF8Encoding $false))
+
 python -m PyInstaller --noconfirm --clean --noupx --windowed `
     --name AGMS `
     --icon $icon `
+    --version-file $versionFile `
     --add-data "$icon;." `
     --distpath "$PSScriptRoot\dist" `
     --workpath "$PSScriptRoot\build\pyinstaller" `
@@ -51,6 +64,13 @@ python -m PyInstaller --noconfirm --clean --noupx --windowed `
     --collect-submodules selenium.webdriver `
     google_maps_scraper_gui.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+
+# Check the file properties took effect, because Windows shows an empty publisher otherwise
+$properties = (Get-Item "$PSScriptRoot\dist\AGMS\AGMS.exe").VersionInfo
+if ($properties.CompanyName -ne $publisher -or $properties.FileVersion -ne $version -or $properties.ProductName -notlike "*AGMS*") {
+    throw "AGMS.exe has the wrong file properties: company '$($properties.CompanyName)', version '$($properties.FileVersion)', product '$($properties.ProductName)'."
+}
+Write-Host "File properties: $($properties.CompanyName), version $($properties.FileVersion)"
 
 # A windowed exe returns at once when called directly, so start it and wait for the exit code
 $report = Join-Path $env:TEMP "agms_selftest.txt"

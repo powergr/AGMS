@@ -33,7 +33,7 @@ from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # Version
-__version__ = "1.3.4"
+__version__ = "1.3.5"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -851,34 +851,60 @@ class GoogleMapsScraper:
         print(f"Saved {len(self.results)} results to {filename}")
 
     # --- NEW: Export to Databases ---
-    def save_to_sqlite(self, db_name):
+    def database_frame(self, search=None):
+        """The rows for a database table. Unlike the files, database rows also say which search found them,
+        because searches from different runs end up in the same table."""
+        frame = pd.DataFrame(self.format_results_for_export())
+        if search:
+            frame['search'] = search
+        return frame
+
+    def save_to_sqlite(self, db_name, search=None):
         if not self.results:
             return
-        formatted_results = self.format_results_for_export()
-        df = pd.DataFrame(formatted_results)
+        df = self.database_frame(search)
         conn = sqlite3.connect(db_name)
-        df.to_sql('businesses', conn, if_exists='append', index=False)
-        conn.close()
+        try:
+            if search:
+                # A table made before the search column existed gets it added, so old databases keep working
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(businesses)")]
+                if columns and 'search' not in columns:
+                    conn.execute("ALTER TABLE businesses ADD COLUMN search TEXT")
+                    conn.commit()
+            df.to_sql('businesses', conn, if_exists='append', index=False)
+        finally:
+            conn.close()
         logger.info(f"Results saved to SQLite DB: {db_name}")
 
-    def save_to_postgres(self, connection_string):
+    @staticmethod
+    def add_search_column_if_missing(engine):
+        """PostgreSQL (or any SQLAlchemy database): add the search column to a table made without it"""
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        if inspector.has_table('businesses') and 'search' not in [c['name'] for c in inspector.get_columns('businesses')]:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE businesses ADD COLUMN search TEXT"))
+
+    def save_to_postgres(self, connection_string, search=None):
         if not self.results:
             return
         if not SQLALCHEMY_AVAILABLE:
             logger.error("SQLAlchemy not installed. Cannot export to PostgreSQL. Run: pip install SQLAlchemy psycopg2-binary")
             return
         try:
-            formatted_results = self.format_results_for_export()
-            df = pd.DataFrame(formatted_results)
+            df = self.database_frame(search)
             engine = create_engine(normalize_postgres_url(connection_string))
+            if search:
+                self.add_search_column_if_missing(engine)
             df.to_sql('businesses', engine, if_exists='append', index=False)
             logger.info("Results saved successfully to PostgreSQL database")
         except Exception as e:
             logger.error(f"PostgreSQL Export Error: {e}")
-    
-    def export_all(self, output, formats, sqlite_db=None, postgres_conn=None):
+
+    def export_all(self, output, formats, sqlite_db=None, postgres_conn=None, search=None):
         """Run every requested export. One failing export (a CSV open in Excel, a bad database
         URL) is logged and does not stop the others, so scraped results are not lost.
+        `search` is the query, stored in a column of the database rows only (the files keep their layout).
         Returns the names of the exports that failed."""
         formats = set(formats)
         steps = []
@@ -889,9 +915,9 @@ class GoogleMapsScraper:
         if 'excel' in formats:
             steps.append(("Excel", lambda: self.save_to_excel(f"{output}.xlsx")))
         if sqlite_db:
-            steps.append(("SQLite", lambda: self.save_to_sqlite(sqlite_db)))
+            steps.append(("SQLite", lambda: self.save_to_sqlite(sqlite_db, search)))
         if postgres_conn:
-            steps.append(("PostgreSQL", lambda: self.save_to_postgres(postgres_conn)))
+            steps.append(("PostgreSQL", lambda: self.save_to_postgres(postgres_conn, search)))
 
         failed = []
         for name, step in steps:
@@ -1022,7 +1048,7 @@ def execute_scraping_job(args, cities):
         exporter = GoogleMapsScraper.for_export(all_results)
 
         print("\nSaving results...")
-        failed = exporter.export_all(args.output, args.format, args.sqlite, args.postgres)
+        failed = exporter.export_all(args.output, args.format, args.sqlite, args.postgres, search=args.query)
         if failed:
             print(f"[WARNING] These exports failed, see the log above: {', '.join(failed)}")
 

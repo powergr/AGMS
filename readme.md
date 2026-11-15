@@ -25,6 +25,10 @@ The script has updated to work with all the latest changes from Google. Please o
 - ⚡ **CLI Interface**: Easy-to-use command-line interface with multiple options
 - 🖱️ **GUI Interface**: Full-featured desktop app (`google_maps_scraper_gui.py`) with every option of the CLI, plus a menu bar and a built-in guide.
 - 📋 **Job Queue (GUI)**: Line up several searches. They run one after another, and each saves to its own files
+- 🛡️ **Safe Saving (GUI)**: Before a run, AGMS finds result files that already exist and asks whether to keep both, replace them, or skip those jobs. You can also choose the output folder and add the date and time to file names
+- 💼 **Settings (GUI)**: Save and load your whole screen, including the cities and the queue. The app remembers your last session and your recent settings files
+- ⏯️ **Resume (GUI)**: AGMS saves progress after every city. If a long job is stopped or interrupted, press Start again and choose Continue to scrape only the cities that are left
+- 🏷️ **Search column in databases**: SQLite and PostgreSQL rows say which search found them, in both the GUI and the CLI
 - 🧵 **Multi-Threaded**: Run several browsers in parallel to scrape faster
 - 🌐 **Proxy Support**: Route requests through a proxy server
 - ⏰ **Scheduling**: Re-run a job automatically on a daily, hourly, or weekly interval
@@ -51,7 +55,7 @@ The script has updated to work with all the latest changes from Google. Please o
 2. Run it. It installs for your own account, so it needs no administrator rights.
 3. Start **AGMS** from the Start menu. You still need Google Chrome installed.
 
-Results are saved in `Documents\AGMS`. Windows may show a "Windows protected your PC" warning, because the setup file is not code signed. Choose **More info**, then **Run anyway**. You can compare the download with the `.sha256` file on the release page.
+Results are saved in `Documents\AGMS`. Windows may show a "Windows protected your PC" warning, because the setup file is not code signed. Choose **More info**, then **Run anyway**. You can compare the download with the `.sha256` file on the release page. The setup file and `AGMS.exe` name Pashalis Laoutaris as the publisher in their file properties. Windows still shows the warning, because only a code signing certificate removes it.
 
 The installed app is the graphical version. Inside it, choose **Help, How to Use** (or press F1) for a guide to every feature. To use the command line, or to run from source, follow the steps below.
 
@@ -343,13 +347,17 @@ python google_maps_scraper.py -q "restaurants" -c "Paris, France" --verbose
   `EOFError`, while it waits for input that never arrives.
 - **`--sqlite` and `--postgres` always append.** There is no deduplication. Repeated runs, especially
   with `--schedule`, insert the same businesses again on every run instead of updating existing rows.
-- **Database rows do not say which search they came from.** When a GUI queue has several jobs, they all
-  write into the same table, so the rows from different searches are mixed. CSV, JSON and Excel files are
-  kept apart because each job has its own.
+- **Only database rows have a search column.** CSV, JSON and Excel files keep their usual columns, because
+  each job has its own file. Rows saved by older versions have an empty search value.
+- **Resume is GUI only.** The command line has no saved progress. A command that is interrupted starts over.
 - **Queue jobs share their cities and options.** Every job in the GUI queue uses the same cities, formats,
   delay, workers and proxy. To search different cities, run a separate queue.
 - **The queue is GUI only.** The command line runs one query per command, so use several commands or a
   batch file to run several searches.
+- **The command line replaces files with the same name.** Only the GUI checks for existing result files
+  and asks first. In a script, give each run its own `-o` name.
+- **Settings files are for the GUI.** The `.agms` files and the remembered session are not read by the
+  command line.
 
 ## Performance Tips
 
@@ -404,6 +412,23 @@ The scraper includes built-in delays:
 ## Updates and Versioning
 
 ### Version History
+
+## v1.3.5
+
+- ✅ **The GUI now checks for existing files.** Before a run, AGMS looks for CSV, JSON and Excel files with the names the jobs will use. If any exist, a window lists them and asks: **Keep both** (new files get a number, such as `hotels_2.csv`), **Replace**, **Skip those jobs** (finishes an interrupted queue), or Cancel. Earlier runs were silently overwritten before
+- ✅ A file that appears while a long job is running is never overwritten. The results are saved with a number instead
+- ✅ **Save in folder** box with a Browse button. The folder is created if it does not exist, and File, Open Results Folder opens it. A full path typed in Save as still works for a single job
+- ✅ **Add the date and time to file names** option, so every run, including each repeat of a schedule, keeps its own files
+- ✅ **Save Settings now saves everything.** The cities (the list, the From File choice and the file path) and the new folder options were missing before. Settings are now one `.agms` file, which is plain JSON and opens in Notepad. Older `.txt` settings files still load
+- ✅ **Load Settings is safe.** The whole file is checked before anything changes, so a damaged file or a results file picked by mistake gives a clear message and leaves the form alone. If some values are wrong, the good ones load and a message lists the rest. The Delay label now updates after loading
+- ✅ **File, Recent Settings** lists your last settings files
+- ✅ **File, Remember Last Session** (on by default) restores your queue, cities and options when you start the app again. Passwords are never kept
+- ✅ Fixed a freeze: pressing Stop at the same moment the scraper wrote a log line could lock the window for good. The log no longer holds a lock while it waits for the screen
+- ✅ **Resume an interrupted job.** The GUI saves progress after every city. After Stop, a closed window, a crash or a failed city, press Start on the same job and a window offers **Continue** (scrape only the cities that are left, then save everything together) or **Start over**. A city that Stop cut short is scraped again in full. If only saving failed, such as a CSV open in Excel, Continue saves without scraping. Progress files live in the user profile folder and are deleted when the job finishes, or after 30 days
+- ✅ **Databases get each city once.** When a job is stopped and continued, SQLite and PostgreSQL receive each finished city a single time, so continuing never adds duplicates
+- ✅ **Search column.** SQLite and PostgreSQL rows now have a `search` column with the query that found them, in the GUI and the CLI. Older tables get the column added on the next save. CSV, JSON and Excel files are unchanged
+- ✅ **Publisher name.** Pashalis Laoutaris is now the publisher in the setup wizard, in Windows Installed apps, in the file properties of the setup file and `AGMS.exe`, and in the About window. The build script writes the version and publisher into `AGMS.exe` and stops if they are missing. The license file no longer has leftover template brackets around the name
+- ✅ The packaged app's self-test now also checks the search column and the progress files
 
 ## v1.3.4
 
@@ -527,6 +552,8 @@ To build on your own machine, install Inno Setup 6.3 or newer, then run:
 pip install -r requirements.txt pyinstaller
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
+
+The publisher, Pashalis Laoutaris, is set in three places: the `Publisher` line at the top of `installer/agms.iss` (the setup wizard, Installed apps, and the setup file's properties), `installer/version_info.template.txt` (the properties of `AGMS.exe`), and `PUBLISHER` in `google_maps_scraper_gui.py` (the About window). The build script fills in the version and checks that `AGMS.exe` carries the publisher before it goes on.
 
 The setup file appears in `dist\installer`. Add `-SkipInstaller` to build and test only the app, which lands in `dist\AGMS`. The self-test is part of the app, so you can also run `AGMS.exe --self-test` and read `agms_selftest.txt` in your temp folder. Add `--online` to also make an HTTPS request and start Chrome. The build script does this by default, so it needs Chrome and an internet connection. Use `-SkipOnlineTest` to leave those out.
 
@@ -665,6 +692,10 @@ python google_maps_scraper.py --version
 
    python google_maps_scraper.py -q "plumbers" -c "Miami, USA" --postgres "postgresql://admin:password@localhost/maps"
    ```
+
+   Both write to a table named `businesses`. Each row has a `search` column holding the query, here `plumbers`,
+   so searches that share one table can be told apart. A table made by an older version gets the column added
+   on the next save.
 
 3. **Excel Export:**
 

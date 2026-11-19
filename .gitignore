@@ -45,6 +45,7 @@ github_plan.md
 issues.md
 setup_summary.md
 fashion-directory.txt
+*.agms
 
 # Chrome driver cache
 .wdm/

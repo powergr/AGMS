@@ -80,12 +80,17 @@ jobs:
           "$hash  $($setup.Name)" | Out-File -FilePath "$($setup.FullName).sha256" -Encoding ascii
           Write-Host "$($setup.Name)  $hash  ($([math]::Round($setup.Length / 1MB, 1)) MB)"
 
+      # Only for a run started by hand. A tag push attaches the same files to the
+      # release, and artifacts count against Actions storage, so they are kept
+      # for a few days only.
       - name: Keep the setup file as an artifact
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
           name: AGMS-Setup-${{ steps.version.outputs.version }}
           path: dist/installer/*
           if-no-files-found: error
+          retention-days: 3
 
       - name: Attach the setup file to the release
         if: startsWith(github.ref, 'refs/tags/')
